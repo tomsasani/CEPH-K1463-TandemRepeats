@@ -10,13 +10,16 @@ from bx.intervals.intersection import Interval, IntervalTree
 import csv
 import tqdm
 import re
-from typing import Tuple, List
+from typing import Tuple, List, Union
 from Bio import Align
 import matplotlib.patches as patches
+import cyvcf2
+import argparse
 
 plt.rc("font", size=14)
 
 RC = {"A": "T", "T": "A", "C": "G", "G": "C", "N": "N"}
+BAM_FH = "/scratch/ucgd/lustre-work/quinlan/u6055472/storage/elementbio/CEPH/complete/"
 
 
 def read_exclude(fh: str) -> IntervalTree:
@@ -113,162 +116,180 @@ def count_motif_regex(read: str, motif: str) -> Tuple[int, int, int]:
 
 
 def find_longest_interval(intervals: List[Tuple[int, int]]) -> Tuple[int, int]:
-    # find the longest continuous interval
     ilens = [i[-1] - i[0] for i in intervals]
     max_i = np.argmax(ilens)
     return intervals[max_i]
 
 
 def count_indel_in_read(ct: List[Tuple[int, int]]) -> int:
+    """count up inserted and deleted sequence in a read
+    using the pysam cigartuples object.
+
+    Args:
+        ct (List[Tuple[int, int]]): cigartuples object from pysam aligned segment
+
+    Returns:
+        int: total in/del sequence (negative if net deleted, positive if net inserted)
+    """
     total_indel = 0
     for op, v in ct:
-        if op in (1, 2):
+        if op == 1:
             total_indel += v
+        elif op == 2:
+            total_indel -= v
     return total_indel
 
 
-# read in de novos
-dnms = pd.read_parquet("tr_validation/data/df_transmission_C5.parquet.gzip")
+def get_read_diff(
+    read: pysam.AlignedSegment,
+    ref_al: int,
+    alt_al: int,
+    var: cyvcf2.Variant,
+    min_mapq: int = 10,
+) -> Union[None, int]:
+    """compare a single sequencing read and compare it to the reference.
+    count up the net inserted/deleted sequence in the read, and figure out 
+    if that amount of indel sequence matches what we'd expect for a read 
+    supporting the reference allele at this locus. if not, record the amount
+    of indel sequence in the read.
 
-VCF_FH = "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/TRGT/f135436/2188_DM_adotto_v02.sorted.vcf.gz"
-BAM_FH = "/scratch/ucgd/lustre-work/quinlan/u6055472/storage/elementbio/CEPH/merged/"
+    Args:
+        read (pysam.AlignedSegment): _description_
+        ref_al (int): _description_
+        alt_al (int): _description_
+        var (cyvcf2.Variant): _description_
+        min_mapq (int, optional): _description_. Defaults to 10.
 
-FATHER, MOTHER = "2214", "2213"
+    Returns:
+        Union[None, int]: _description_
+    """
+    
+    # initial filter on mapping quality
+    if read.mapping_quality < min_mapq:
+        return None
+    
+    # NOTE: need to filter reads so that we only deal with reads
+    # that completely overlap the expanded locus
+    qs, qe = read.reference_start, read.reference_end
+    # ensure that this read completely overlaps the expected repeat expansion.
+    # NOTE: this is hacky and doesn't account for flanking sequence
+    if qs > var.start or qe < var.end:
+        return None
 
-vcf = VCF(VCF_FH, gts012=True)
+    # we can simply count up the indel content of the read (w/r/t what's in the
+    # reference genome) as a proxy for expanded/deleted sequence.
 
-aligner = Align.PairwiseAligner()
+    # query the CIGAR string in the read.
+    ct = read.cigartuples
+    # figure out the difference in allele length between the read and the reference
+    diff = count_indel_in_read(ct)
 
-res = []
+    # if this difference matches what we'd expect for a read supporting the 
+    # reference allele, move on.
+    # NOTE: should probably count this kind of read support in some way.
+    if diff == ref_al - len(var.REF):
+        return None
+    
+    return diff
 
-for i, row in dnms.iterrows():
-    trid = row["trid"]
-    chrom, start, end = row["chrom"], row["start"], row["end"]
-    region = f"{chrom}:{start}-{end}"
 
-    # print (row)
-    # break
+def main(args):
+    # read in de novo parquet file and VCF
+    dnms = pd.read_parquet(args.dnms)
+    vcf = VCF(args.vcf, gts012=True)
 
-    # read in BAM file for this sample
-    relevant_bam = BAM_FH + "{}_1_merged_sort.bam".format(row["sample_id"])
-    bam = pysam.AlignmentFile(relevant_bam, "rb")
+    # store output
+    res = []
 
-    # loop over VCF, allowing for slop to ensure we hit the STR
-    for var in vcf(region):
-        var_trid = var.INFO.get("TRID")
-        assert var_trid == trid
+    SKIPPED = 0
+    for _, row in dnms.iterrows():
+        trid = row["trid"]
+        chrom, start, end = row["chrom"], row["start"], row["end"]
+        region = f"{chrom}:{start}-{end}"
 
-        tr_motif = var.INFO.get("MOTIFS").split(",")
-
-        # for now, ignore sites with multiple TR motifs.
-        # don't think there are any in the DNM file at the moment
-        if len(tr_motif) > 1:
+        if row["genotype"] == 0:
             continue
-        tr_motif = tr_motif[0]
-        
-        # if the repeated motif is longer than an element read, move on
-        if len(tr_motif) > 150: continue
-        if len(var.ALT) != 1: continue
+        if row["sample_id"] != args.sample_id:
+            continue
 
-        # perform a local alignment of the REF and ALT alleles
-        # at this site to figure out how much extra sequence
-        # is added in the ALT w/r/t to the REF
-        # alignments = aligner.align(var.REF, var.ALT[0])
+        # read in BAM file for this sample
+        relevant_bam = BAM_FH + "{}_1_merged_sort.bam".format(args.sample_id)
+        bam = pysam.AlignmentFile(relevant_bam, "rb")
 
-        # perform a simple regex query to figure out where in the
-        # REF/ALT alleles the TR motif begins. we need to do this
-        # in order to know how much padding is on either side of the
-        # actual TR motif in the reported REF/ALT.
-        motif_locs = count_motif_regex(var.REF, tr_motif)
-        if len(motif_locs) == 0:
-            print (var.format("AL"))
-            print (tr_motif)
-            longest_motif_interval = (0, 0)
-        else:
-            # get the index of the longest contiguous chunk of repeated motifs
-            longest_motif_interval = find_longest_interval(motif_locs)
-        # figure out the position at which the motif repeats start and end. we'll
-        # use this to ensure that reads overlap the full repeat sequence.
-        motif_s, motif_e = longest_motif_interval
+        # loop over VCF, allowing for slop to ensure we hit the STR
+        for var in vcf(region):
+            var_trid = var.INFO.get("TRID")
+            assert var_trid == trid
 
-        # figure out how long the reference and alternate alleles are
-        ref_al, alt_al = var.format("AL")[0]
-        # if the length of the repeat expansion is greater than the length
-        # of a typical element read, move on
-        if abs(alt_al - ref_al) > 100: continue
+            # concatenate the alleles at this locus
+            alleles = [var.REF]
+            alleles.extend(var.ALT)
 
-        gts = var.gt_types
+            # figure out the motif that's repeated in the STR
+            tr_motif = var.INFO.get("MOTIFS").split(",")
+            # for now, ignore sites with multiple TR motifs.
+            # don't think there are any in the DNM file at the moment
+            if len(tr_motif) > 1:
+                SKIPPED += 1
+                continue
+            tr_motif = tr_motif[0]
 
-        # loop over reads in the BAM for this individual
-        motif_counts = []
-        for ri, read in enumerate(bam.fetch(var.CHROM, var.start, var.end)):
-            # NOTE: need to filter reads so that we only deal with reads
-            # that completely overlap the expanded locus
-            qs, qe = read.reference_start, read.reference_end
-            # ensure that this read completely overlaps the expected repeat expansion.
-            # NOTE: the repeat expansion begins at the start of the variant (var.start) +
-            # the index in the REF allele at which the motif expansion starts (longest_motif_interval[0]).
-            # the repeat expansion ends at the end of the variant (var.end) - (longest_motif_interval[1]).
-            if qs > (var.start + motif_s) or qe < (var.end - motif_e):
+            # figure out the genotype of this sample
+            gt = var.genotypes
+            # the sample might be genotype 0/1 or 1/2
+            ref_idx, alt_idx = gt[0][:2]
+            ref_allele, alt_allele = alleles[ref_idx], alleles[alt_idx]
+
+            # the difference between the AL fields at this locus represents the
+            # expected expansion size of the STR.
+            try:
+                ref_al, alt_al = var.format("AL")[0]
+            except ValueError:
+                SKIPPED += 1
                 continue
 
-            # query the CIGAR string in the read.
-            ct = read.cigartuples
-            total_indel_in_read = count_indel_in_read(ct)
-            # motif_counts.append(total_indel_in_read)
-            # for k, v in d.items():
-            res.append(
-                {
-                    "region": region,
-                    "motif": tr_motif,
-                    "indel_in_read": total_indel_in_read,
-                    "ref_al": ref_al,
-                    "alt_al": alt_al,
-                    "read_i": ri,
-                }
-            )
+            # if the length of the repeat expansion is greater than the length
+            # of a typical element read, move on
+            allele_length_diff = alt_al - ref_al
+            if abs(allele_length_diff) > 100 or allele_length_diff == 0:
+                SKIPPED += 1
+                continue
 
+            # loop over reads in the BAM for this individual
+            diffs = []
+            for ri, read in enumerate(bam.fetch(var.CHROM, var.start, var.end)):
+                diff = get_read_diff(read, ref_al, alt_al, var)
+                if diff is None: continue
+                else: diffs.append(diff)
 
-res_df = pd.DataFrame(res)
-res_df["allele_length_diff"] = abs(res_df["ref_al"] - res_df["alt_al"])
+            # count up all recorded diffs between reads and reference allele
+            diff_counts = Counter(diffs).most_common()
 
-res_df.to_csv("out.csv", index=False)
+            for diff, count in diff_counts[:2]:
+                res.append(
+                    {
+                        "region": region,
+                        "motif": tr_motif,
+                        "diff": diff,
+                        "count": count,
+                        "exp_allele_diff": alt_al - len(var.REF),
+                        "n_with_denovo_allele_strict": row[
+                            "n_with_denovo_allele_strict"
+                        ],
+                    }
+                )
 
-print (res_df.groupby("region").size().shape)
+    print("SKIPPED", SKIPPED)
 
-res_df = res_df.query("allele_length_diff > 0 and indel_in_read > 0")
-f, ax = plt.subplots(figsize=(8, 6))
+    res_df = pd.DataFrame(res)
+    res_df.to_csv(args.out)
 
-x = res_df["allele_length_diff"].values
-y = res_df["indel_in_read"].values
+if __name__ == "__main__":
+    p = argparse.ArgumentParser()
+    p.add_argument("--dnms")
+    p.add_argument("--vcf")
+    p.add_argument("--out")
+    p.add_argument("--sample_id")
+    args = p.parse_args()
+    main(args)
 
-jitter = np.random.normal(loc=0, scale=0.05, size=x.shape[0])
-
-ax.scatter(x + jitter, y, alpha=0.25, c="cornflowerblue", s=100)
-ax.axline((0, 0), slope=1, ls=":", c="k", lw=2, zorder=-1)
-if ax.get_legend() is not None:
-    ax.get_legend().remove()
-sns.despine(ax=ax, top=True, right=True)
-ax.set_xlabel("Sum of indel CIGAR operations in read")
-ax.set_ylabel("Allele length difference b/w REF and ALT")
-f.tight_layout()
-f.savefig("o.png", dpi=200)
-
-# region = res_df.iloc[0]["region"]
-# res_df_sub = res_df[res_df["region"] == region]
-# motif = res_df_sub["motif"].unique()[0]
-
-# f, ax = plt.subplots()
-# ax.bar(
-#     res_df_sub["indel_in_read"],
-#     res_df_sub["num_reads"],
-#     1,
-#     ec="k",
-#     lw=1,
-#     color="cornflowerblue",
-# )
-# ax.axvline(res_df_sub["allele_length_diff"].values[0])
-# ax.set_xlabel("Sum of indel CIGAR operations in read")
-# ax.set_ylabel("Number of reads")
-# f.tight_layout()
-# f.savefig("o.png", dpi=200)
