@@ -19,8 +19,6 @@ import argparse
 plt.rc("font", size=14)
 
 RC = {"A": "T", "T": "A", "C": "G", "G": "C", "N": "N"}
-BAM_FH = "/scratch/ucgd/lustre-work/quinlan/u6055472/storage/elementbio/CEPH/complete/"
-
 
 def read_exclude(fh: str) -> IntervalTree:
     """
@@ -142,10 +140,8 @@ def count_indel_in_read(ct: List[Tuple[int, int]]) -> int:
 
 def get_read_diff(
     read: pysam.AlignedSegment,
-    ref_al: int,
-    alt_al: int,
     var: cyvcf2.Variant,
-    min_mapq: int = 10,
+    min_mapq: int = 60,
 ) -> Union[None, int]:
     """compare a single sequencing read and compare it to the reference.
     count up the net inserted/deleted sequence in the read, and figure out 
@@ -155,8 +151,6 @@ def get_read_diff(
 
     Args:
         read (pysam.AlignedSegment): _description_
-        ref_al (int): _description_
-        alt_al (int): _description_
         var (cyvcf2.Variant): _description_
         min_mapq (int, optional): _description_. Defaults to 10.
 
@@ -183,12 +177,6 @@ def get_read_diff(
     ct = read.cigartuples
     # figure out the difference in allele length between the read and the reference
     diff = count_indel_in_read(ct)
-
-    # if this difference matches what we'd expect for a read supporting the 
-    # reference allele, move on.
-    # NOTE: should probably count this kind of read support in some way.
-    if diff == ref_al - len(var.REF):
-        return None
     
     return diff
 
@@ -197,29 +185,29 @@ def main(args):
     # read in de novo parquet file and VCF
     dnms = pd.read_parquet(args.dnms)
     vcf = VCF(args.vcf, gts012=True)
+    # read in BAM file for this sample
+    bam = pysam.AlignmentFile(args.bam, "rb")
+
+    dnms = dnms[(dnms["sample_id"] == args.sample_id) & (dnms["genotype"] != 0)]
 
     # store output
     res = []
 
-    SKIPPED = 0
+    SKIPPED, TOTAL_SITES = [], 0
     for _, row in dnms.iterrows():
+
+        # extract info about the DNM
         trid = row["trid"]
         chrom, start, end = row["chrom"], row["start"], row["end"]
         region = f"{chrom}:{start}-{end}"
 
-        if row["genotype"] == 0:
-            continue
-        if row["sample_id"] != args.sample_id:
-            continue
-
-        # read in BAM file for this sample
-        relevant_bam = BAM_FH + "{}_1_merged_sort.bam".format(args.sample_id)
-        bam = pysam.AlignmentFile(relevant_bam, "rb")
-
         # loop over VCF, allowing for slop to ensure we hit the STR
         for var in vcf(region):
+            TOTAL_SITES += 1
             var_trid = var.INFO.get("TRID")
             assert var_trid == trid
+
+            if region == "chr5:176012762-176012882": print (var)
 
             # concatenate the alleles at this locus
             alleles = [var.REF]
@@ -230,7 +218,7 @@ def main(args):
             # for now, ignore sites with multiple TR motifs.
             # don't think there are any in the DNM file at the moment
             if len(tr_motif) > 1:
-                SKIPPED += 1
+                SKIPPED.append("2+ TR motifs")
                 continue
             tr_motif = tr_motif[0]
 
@@ -245,51 +233,100 @@ def main(args):
             try:
                 ref_al, alt_al = var.format("AL")[0]
             except ValueError:
-                SKIPPED += 1
+                SKIPPED.append("invalid AL field")
+                continue
+
+            # if the total length of the allele is greater than the length of
+            # a typical element read, move on
+            if alt_al > 150: 
+                SKIPPED.append("ALT allele length > 150 bp")
                 continue
 
             # if the length of the repeat expansion is greater than the length
             # of a typical element read, move on
             allele_length_diff = alt_al - ref_al
-            if abs(allele_length_diff) > 100 or allele_length_diff == 0:
-                SKIPPED += 1
+            if abs(allele_length_diff) > 100:
+                SKIPPED.append("Motif expansion > 100 bp")
+                continue
+        
+            if allele_length_diff == 0:
+                SKIPPED.append("Allele lengths are identical")
                 continue
 
             # loop over reads in the BAM for this individual
             diffs = []
             for ri, read in enumerate(bam.fetch(var.CHROM, var.start, var.end)):
-                diff = get_read_diff(read, ref_al, alt_al, var)
+                diff = get_read_diff(read, var)
                 if diff is None: continue
                 else: diffs.append(diff)
 
             # count up all recorded diffs between reads and reference allele
             diff_counts = Counter(diffs).most_common()
 
-            for diff, count in diff_counts[:2]:
-                res.append(
-                    {
+            # if len(diff_counts) > 2 and not PLOTTED and len(diffs) > 20  and np.random.random() < 0.25: 
+            #     print (diff_counts)
+            #     print (alt_al - len(var.REF))
+            #     print (ref_al - len(var.REF))
+            #     print (tr_motif)
+            #     f, ax = plt.subplots(figsize=(6, 4))
+            #     counts = [k for k,v in diff_counts]
+            #     ind = np.arange(min(counts), max(counts) + 1)
+            #     hist, edges = np.histogram(diffs)
+            #     print (hist, edges)
+            #     print (ind)
+            #     print (diffs)
+            #     ax.hist(diffs, color="gainsboro", edgecolor="k", lw=1)
+            #     ax.axvline(alt_al - len(var.REF), c="firebrick", ls=":", label="ALT - REF")
+            #     ax.axvline(ref_al - len(var.REF), c="dodgerblue", ls=":", label="REF - REF")
+            #     # ax.legend(title="Expected AL difference")
+            #     ax.set_xlabel("AL difference between Element read and REF allele")
+            #     ax.set_ylabel("# of Element reads")
+            #     sns.despine(ax=ax, top=True, right=True)
+            #     f.tight_layout()
+            #     f.savefig("diffs.png", dpi=200)
+            #     PLOTTED = True
+
+            #for diff, count in diff_counts[:2]:
+                #if diff == 0: continue
+
+            if len(diffs) == 0: 
+                SKIPPED.append("No valid spanning Element reads")
+                continue
+
+            for diff, count in diff_counts:#[:2]:
+
+                d = {
                         "region": region,
                         "motif": tr_motif,
                         "diff": diff,
-                        "count": count,
-                        "exp_allele_diff": alt_al - len(var.REF),
+                        "Read support": count,
+                        "ref_al": ref_al,
+                        "alt_al": alt_al,
+                        "in_homopolymer": row["is_homopolymer"],
+                        "exp_allele_diff_alt": alt_al - len(var.REF),
+                        "exp_allele_diff_ref": ref_al - len(var.REF),
                         "n_with_denovo_allele_strict": row[
                             "n_with_denovo_allele_strict"
                         ],
                     }
-                )
+                res.append(d)
 
-    print("SKIPPED", SKIPPED)
-
+    print ("TOTAL sites: ", dnms[dnms["sample_id"] == args.sample_id].shape[0], TOTAL_SITES)
+    for reason, count in Counter(SKIPPED).most_common():
+        print (f"{reason}: {count}")
     res_df = pd.DataFrame(res)
+    print (len(res_df["region"].unique()), TOTAL_SITES - len(SKIPPED))
     res_df.to_csv(args.out)
+
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--dnms")
     p.add_argument("--vcf")
+    p.add_argument("--bam")
     p.add_argument("--out")
     p.add_argument("--sample_id")
+
     args = p.parse_args()
     main(args)
 
