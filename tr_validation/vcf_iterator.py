@@ -293,7 +293,11 @@ def main(args):
                 SKIPPED.append("No valid spanning Element reads")
                 continue
 
-            for diff, count in diff_counts:#[:2]:
+            # if alt_al - len(var.REF) == 0: 
+            #     print (var)
+            #     print (ref_al - len(var.REF), alt_allele == var.REF)
+
+            for diff, count in diff_counts:
 
                 d = {
                         "region": region,
@@ -302,7 +306,7 @@ def main(args):
                         "Read support": count,
                         "ref_al": ref_al,
                         "alt_al": alt_al,
-                        "in_homopolymer": row["is_homopolymer"],
+                        "In homopolymer?": row["is_homopolymer"],
                         "exp_allele_diff_alt": alt_al - len(var.REF),
                         "exp_allele_diff_ref": ref_al - len(var.REF),
                         "n_with_denovo_allele_strict": row[
