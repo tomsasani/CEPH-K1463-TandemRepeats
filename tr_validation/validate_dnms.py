@@ -15,10 +15,12 @@ from Bio import Align
 import matplotlib.patches as patches
 import cyvcf2
 import argparse
+import doctest
 
 plt.rc("font", size=14)
 
 RC = {"A": "T", "T": "A", "C": "G", "G": "C", "N": "N"}
+
 
 def read_exclude(fh: str) -> IntervalTree:
     """
@@ -52,82 +54,27 @@ def read_exclude(fh: str) -> IntervalTree:
     return tree
 
 
-def revcomp(s: str):
-    return "".join([RC[k] for k in s[::-1]])
-
-
-def merge_intervals(intervals: List[Tuple[int, int]]) -> List[Tuple[int, int]]:
-    """take a list of (a, b) interval locations and merge into the
-    simplest representation of those intervals.
-
-    Args:
-        intervals (List[Tuple[int, int]]): _description_
-
-    Returns:
-        List[Tuple[int, int]]: _description_
-    """
-    merged = []
-    merged.append(intervals[0])
-    for a, b in intervals[1:]:
-        prev_a, prev_b = merged[-1]
-        # if the right side of the previous interval
-        # is the same as the left side of the current interval...
-        if prev_b == a:
-            # ...create a new merged interval
-            new = (prev_a, b)
-            merged[-1] = new
-        else:
-            merged.append((a, b))
-    return merged
-
-
-def count_motif_regex(read: str, motif: str) -> Tuple[int, int, int]:
-    """count TR motifs in a string using basic regex.
-
-    Args:
-        read (str): target sequence
-        motif (str): query sequence
-
-    Returns:
-        Tuple[int, int, int]: tuple of three integers
-    """
-    locations = []
-    cur_start, cur_end = None, None
-    for m in re.finditer(motif, read):
-        ms, me = m.start(), m.end()
-        if cur_start is None:
-            locations.append((ms, me))
-        else:
-            if ms == cur_end:
-                locations.append((ms, me))
-            else:
-                pass
-        cur_start = ms
-        cur_end = me
-
-    # merge the intervals
-    if len(locations) == 0:
-        return []
-    else:
-        merged_intervals = merge_intervals(locations)
-        return merged_intervals
-
-
-def find_longest_interval(intervals: List[Tuple[int, int]]) -> Tuple[int, int]:
-    ilens = [i[-1] - i[0] for i in intervals]
-    max_i = np.argmax(ilens)
-    return intervals[max_i]
-
-
 def count_indel_in_read(ct: List[Tuple[int, int]]) -> int:
     """count up inserted and deleted sequence in a read
-    using the pysam cigartuples object.
+    using the pysam cigartuples object. a cigartuples object
+    is a list of tuples -- each tuple stores a CIGAR operation as
+    its first element and the number of bases attributed to that operation
+    as its second element. exact match is (0, N), where N is the number
+    of bases that match the reference, insertions are (1, N), and deletions
+    are (2, N).
 
     Args:
         ct (List[Tuple[int, int]]): cigartuples object from pysam aligned segment
 
     Returns:
         int: total in/del sequence (negative if net deleted, positive if net inserted)
+
+    >>> count_indel_in_read([(0, 50), (1, 4), (2, 3), (1, 1), (0, 90), (4, 2)])
+    2
+    >>> count_indel_in_read([(0, 50), (1, 4), (2, 3), (1, 7), (0, 10)])
+    8
+    >>> count_indel_in_read([(0, 150)])
+    0
     """
     total_indel = 0
     for op, v in ct:
@@ -138,14 +85,67 @@ def count_indel_in_read(ct: List[Tuple[int, int]]) -> int:
     return total_indel
 
 
+def reformat_cigartuples(
+    ct: Tuple[int, int],
+    rs: int,
+    re: int,
+    vs: int,
+    ve: int,
+):
+    """_summary_
+
+    Args:
+        ct (Tuple[int, int]): _description_
+        rs (int): _description_
+        re (int): _description_
+        vs (int): _description_
+        ve (int): _description_
+
+    Returns:
+        _type_: _description_
+    """
+    # expand the CIGAR operations
+    cigar_arr = np.zeros(re - rs)
+    cur_s = 0
+    for k, v in ct:
+        cigar_arr[cur_s : cur_s + v] = k
+        cur_s += v
+
+    # figure out the interval of overlap between the
+    # read and the variant
+    assert rs < re
+    assert vs < ve
+
+    read_arr = set(range(rs, re))
+    var_arr = set(range(vs, ve))
+    overlap_arr = list(read_arr.intersection(var_arr))
+
+    ops = 0
+
+    for i in np.arange(cigar_arr.shape[0]):
+        cur_pos = i + rs
+        if cur_pos not in overlap_arr:
+            continue
+        op = cigar_arr[i]
+        if op == 1:
+            ops += 1
+        elif op == 2:
+            ops -= 1
+        else:
+            continue
+
+    return ops
+
+
 def get_read_diff(
     read: pysam.AlignedSegment,
-    var: cyvcf2.Variant,
-    min_mapq: int = 60,
+    start: int,
+    end: int,
+    min_mapq: int = 10,
 ) -> Union[None, int]:
     """compare a single sequencing read and compare it to the reference.
-    count up the net inserted/deleted sequence in the read, and figure out 
-    if that amount of indel sequence matches what we'd expect for a read 
+    count up the net inserted/deleted sequence in the read, and figure out
+    if that amount of indel sequence matches what we'd expect for a read
     supporting the reference allele at this locus. if not, record the amount
     of indel sequence in the read.
 
@@ -157,36 +157,72 @@ def get_read_diff(
     Returns:
         Union[None, int]: _description_
     """
-    
+
+    # NOTE: need to only include cigar string entries that overlap the variant
+
     # initial filter on mapping quality
     if read.mapping_quality < min_mapq:
         return None
-    
+
     # NOTE: need to filter reads so that we only deal with reads
     # that completely overlap the expanded locus
     qs, qe = read.reference_start, read.reference_end
     # ensure that this read completely overlaps the expected repeat expansion.
     # NOTE: this is hacky and doesn't account for flanking sequence
-    if qs > var.start or qe < var.end:
+    if qs > start or qe < end:
         return None
-
-    # we can simply count up the indel content of the read (w/r/t what's in the
-    # reference genome) as a proxy for expanded/deleted sequence.
 
     # query the CIGAR string in the read.
     ct = read.cigartuples
-    # figure out the difference in allele length between the read and the reference
-    diff = count_indel_in_read(ct)
-    
+    # reformat_cigartuples(ct, qs, qe, start, end)
+    # subset the CIGAR tuples object to only include the overlapping
+    # part (we don't care about indel operations way upstream or downstream
+    # of the actual variant)
+    # we can simply count up the indel content of the read (w/r/t what's in the
+    # reference genome) as a proxy for expanded/deleted sequence.
+    diff = reformat_cigartuples(ct, qs, qe, start, end)
+
     return diff
 
 
 def main(args):
     # read in de novo parquet file and VCF
     dnms = pd.read_parquet(args.dnms)
+
+    # count DNMs observed in
+    num_obs = (
+        dnms.groupby("trid")
+        .size()
+        .sort_values()
+        .reset_index()
+        .rename(columns={0: "num_obs"})
+    )
+    dnms = dnms.merge(num_obs, on="trid")
+    dnms = dnms.query("num_obs == 1")
+
     vcf = VCF(args.vcf, gts012=True)
-    # read in BAM file for this sample
-    bam = pysam.AlignmentFile(args.bam, "rb")
+
+    # read in BAM files for this sample
+    kid_bam = pysam.AlignmentFile(
+        args.kid_bam,
+        "rb" if args.kid_bam.endswith("bam") else "rc",
+    )
+    mom_bam = (
+        pysam.AlignmentFile(
+            args.mom_bam,
+            "rb" if args.mom_bam.endswith("bam") else "rc",
+        )
+        if args.mom_bam != "None"
+        else None
+    )
+    dad_bam = (
+        pysam.AlignmentFile(
+            args.dad_bam,
+            "rb" if args.dad_bam.endswith("bam") else "rc",
+        )
+        if args.mom_bam != "None"
+        else None
+    )
 
     dnms = dnms[(dnms["sample_id"] == args.sample_id) & (dnms["genotype"] != 0)]
 
@@ -195,7 +231,6 @@ def main(args):
 
     SKIPPED, TOTAL_SITES = [], 0
     for _, row in dnms.iterrows():
-
         # extract info about the DNM
         trid = row["trid"]
         chrom, start, end = row["chrom"], row["start"], row["end"]
@@ -206,8 +241,6 @@ def main(args):
             TOTAL_SITES += 1
             var_trid = var.INFO.get("TRID")
             assert var_trid == trid
-
-            if region == "chr5:176012762-176012882": print (var)
 
             # concatenate the alleles at this locus
             alleles = [var.REF]
@@ -224,9 +257,10 @@ def main(args):
 
             # figure out the genotype of this sample
             gt = var.genotypes
-            # the sample might be genotype 0/1 or 1/2
-            ref_idx, alt_idx = gt[0][:2]
-            ref_allele, alt_allele = alleles[ref_idx], alleles[alt_idx]
+            if gt[0] == 0:
+                SKIPPED.append("Sample doesn't have an ALT allele")
+                continue
+
 
             # the difference between the AL fields at this locus represents the
             # expected expansion size of the STR.
@@ -238,69 +272,38 @@ def main(args):
 
             # if the total length of the allele is greater than the length of
             # a typical element read, move on
-            if alt_al > 150: 
+            if alt_al > 150:
                 SKIPPED.append("ALT allele length > 150 bp")
                 continue
 
-            # if the length of the repeat expansion is greater than the length
-            # of a typical element read, move on
-            allele_length_diff = alt_al - ref_al
-            if abs(allele_length_diff) > 100:
-                SKIPPED.append("Motif expansion > 100 bp")
-                continue
-        
-            if allele_length_diff == 0:
+            if alt_al - ref_al == 0:
                 SKIPPED.append("Allele lengths are identical")
                 continue
 
             # loop over reads in the BAM for this individual
-            diffs = []
-            for ri, read in enumerate(bam.fetch(var.CHROM, var.start, var.end)):
-                diff = get_read_diff(read, var)
-                if diff is None: continue
-                else: diffs.append(diff)
+            # loop over reads in the BAMs
+            for bam, label in zip(
+                (mom_bam, dad_bam, kid_bam),
+                ("mom", "dad", "kid"),
+            ):
+                diffs = []
 
-            # count up all recorded diffs between reads and reference allele
-            diff_counts = Counter(diffs).most_common()
+                if bam is None:
+                    diffs.append(0)
+                else:
+                    for read in bam.fetch(chrom, int(start), int(end)):
+                        diff = get_read_diff(read, int(start), int(end))
+                        if diff is None:
+                            continue
+                        else:
+                            diffs.append(diff)
+                # count up all recorded diffs between reads and reference allele
+                diff_counts = Counter(diffs).most_common()
 
-            # if len(diff_counts) > 2 and not PLOTTED and len(diffs) > 20  and np.random.random() < 0.25: 
-            #     print (diff_counts)
-            #     print (alt_al - len(var.REF))
-            #     print (ref_al - len(var.REF))
-            #     print (tr_motif)
-            #     f, ax = plt.subplots(figsize=(6, 4))
-            #     counts = [k for k,v in diff_counts]
-            #     ind = np.arange(min(counts), max(counts) + 1)
-            #     hist, edges = np.histogram(diffs)
-            #     print (hist, edges)
-            #     print (ind)
-            #     print (diffs)
-            #     ax.hist(diffs, color="gainsboro", edgecolor="k", lw=1)
-            #     ax.axvline(alt_al - len(var.REF), c="firebrick", ls=":", label="ALT - REF")
-            #     ax.axvline(ref_al - len(var.REF), c="dodgerblue", ls=":", label="REF - REF")
-            #     # ax.legend(title="Expected AL difference")
-            #     ax.set_xlabel("AL difference between Element read and REF allele")
-            #     ax.set_ylabel("# of Element reads")
-            #     sns.despine(ax=ax, top=True, right=True)
-            #     f.tight_layout()
-            #     f.savefig("diffs.png", dpi=200)
-            #     PLOTTED = True
-
-            #for diff, count in diff_counts[:2]:
-                #if diff == 0: continue
-
-            if len(diffs) == 0: 
-                SKIPPED.append("No valid spanning Element reads")
-                continue
-
-            # if alt_al - len(var.REF) == 0: 
-            #     print (var)
-            #     print (ref_al - len(var.REF), alt_allele == var.REF)
-
-            for diff, count in diff_counts:
-
-                d = {
+                for diff, count in diff_counts:
+                    d = {
                         "region": region,
+                        "sample": label,
                         "motif": tr_motif,
                         "diff": diff,
                         "Read support": count,
@@ -313,24 +316,52 @@ def main(args):
                             "n_with_denovo_allele_strict"
                         ],
                     }
-                res.append(d)
+                    res.append(d)
 
-    print ("TOTAL sites: ", dnms[dnms["sample_id"] == args.sample_id].shape[0], TOTAL_SITES)
+    print(
+        "TOTAL sites: ",
+        dnms[dnms["sample_id"] == args.sample_id].shape[0],
+        TOTAL_SITES,
+    )
     for reason, count in Counter(SKIPPED).most_common():
-        print (f"{reason}: {count}")
+        print(f"{reason}: {count}")
     res_df = pd.DataFrame(res)
-    print (len(res_df["region"].unique()), TOTAL_SITES - len(SKIPPED))
     res_df.to_csv(args.out)
 
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--dnms")
-    p.add_argument("--vcf")
-    p.add_argument("--bam")
-    p.add_argument("--out")
-    p.add_argument("--sample_id")
+    p.add_argument(
+        "--dnms",
+        help="""Path to parquet file containing candidate DNMs""",
+    )
+    p.add_argument(
+        "--vcf",
+        help="""Path to TRGT VCF file for the sample of interest""",
+    )
+    p.add_argument(
+        "--kid_bam",
+        help="""Path to BAM file with aligned Elements reads for the sample of interest""",
+    )
+    p.add_argument(
+        "-mom_bam",
+        help="""Path to BAM file with aligned Elements reads for the sample of interest""",
+        default=None,
+    )
+    p.add_argument(
+        "-dad_bam",
+        help="""Path to BAM file with aligned Elements reads for the sample of interest""",
+        default=None,
+    )
+    p.add_argument(
+        "--out",
+        help="""Name of output file to store read support evidence for each call.""",
+    )
+    p.add_argument(
+        "--sample_id",
+        help="""Name of sample ID you wish to query.""",
+    )
 
     args = p.parse_args()
+    doctest.testmod()
     main(args)
-
