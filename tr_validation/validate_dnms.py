@@ -91,6 +91,7 @@ def reformat_cigartuples(
     re: int,
     vs: int,
     ve: int,
+    slop: int = 20,
 ):
     """_summary_
 
@@ -117,77 +118,76 @@ def reformat_cigartuples(
     assert vs < ve
 
     read_arr = set(range(rs, re))
-    var_arr = set(range(vs, ve))
+    var_arr = set(range(vs - slop, ve + slop))
     overlap_arr = list(read_arr.intersection(var_arr))
 
-    ops = 0
-
+    indel_ops = 0
     for i in np.arange(cigar_arr.shape[0]):
         cur_pos = i + rs
         if cur_pos not in overlap_arr:
             continue
         op = cigar_arr[i]
         if op == 1:
-            ops += 1
+            indel_ops += 1
         elif op == 2:
-            ops -= 1
-        else:
-            continue
+            indel_ops -= 1
+        # elif op in (4, 5):
+        #     indel_ops += 1
+        else: continue
 
-    return ops
+    return indel_ops
 
 
 def get_read_diff(
     read: pysam.AlignedSegment,
     start: int,
     end: int,
-    min_mapq: int = 10,
+    min_mapq: int = 20,
+    slop: int = 0,
 ) -> Union[None, int]:
-    """compare a single sequencing read and compare it to the reference.
-    count up the net inserted/deleted sequence in the read, and figure out
-    if that amount of indel sequence matches what we'd expect for a read
-    supporting the reference allele at this locus. if not, record the amount
-    of indel sequence in the read.
+    """compare a single sequencing read and to the reference. then,
+    count up the net inserted/deleted sequence in the read.
 
     Args:
-        read (pysam.AlignedSegment): _description_
-        var (cyvcf2.Variant): _description_
-        min_mapq (int, optional): _description_. Defaults to 10.
+        read (pysam.AlignedSegment): pysam read (aligned segment) object.
+        start (int): start position of the variant as reported in the VCF.
+        end (int): end position of the variant as reported in the VCF.
+        min_mapq (int, optional): minimum mapping quality for a read to be considered. Defaults to 60.
+        slop (int, optional): amount of slop around the start and end of the variant reported site. Defaults to 0.
 
     Returns:
         Union[None, int]: _description_
     """
-
-    # NOTE: need to only include cigar string entries that overlap the variant
-
     # initial filter on mapping quality
     if read.mapping_quality < min_mapq:
         return None
-
-    # NOTE: need to filter reads so that we only deal with reads
-    # that completely overlap the expanded locus
+    
     qs, qe = read.reference_start, read.reference_end
     # ensure that this read completely overlaps the expected repeat expansion.
-    # NOTE: this is hacky and doesn't account for flanking sequence
-    if qs > start or qe < end:
+    # NOTE: we are *very* stringent when considering reads, and only include
+    # reads that align completely across the reported variant location +/-
+    # the expected size of the expanded allele. for example, if the location 
+    # of the reference STR is reported in the VCF as chr1:50-60 and we expect
+    # the expansion to be 10bp in size, we only consider reads that align
+    # completely across the interval chr1:40-70.
+    if qs > (start - slop) or qe < (end + slop):
         return None
 
     # query the CIGAR string in the read.
     ct = read.cigartuples
-    # reformat_cigartuples(ct, qs, qe, start, end)
-    # subset the CIGAR tuples object to only include the overlapping
-    # part (we don't care about indel operations way upstream or downstream
-    # of the actual variant)
     # we can simply count up the indel content of the read (w/r/t what's in the
     # reference genome) as a proxy for expanded/deleted sequence.
-    diff = reformat_cigartuples(ct, qs, qe, start, end)
-
+    diff = reformat_cigartuples(ct, qs, qe, start, end, slop=slop)
+    
     return diff
+
 
 
 def main(args):
     # read in de novo parquet file and VCF
-    dnms = pd.read_parquet(args.dnms)
+    dnms = pd.read_csv(args.dnms) if args.dnms.endswith("csv") else pd.read_parquet(args.dnms) 
+
+    # dnms = dnms.sample(10_000, replace=False)
 
     # count DNMs observed in
     num_obs = (
@@ -198,7 +198,7 @@ def main(args):
         .rename(columns={0: "num_obs"})
     )
     dnms = dnms.merge(num_obs, on="trid")
-    dnms = dnms.query("num_obs == 1")
+    # dnms = dnms.query("num_obs == 1")
 
     vcf = VCF(args.vcf, gts012=True)
 
@@ -223,23 +223,32 @@ def main(args):
         if args.mom_bam != "None"
         else None
     )
-
-    dnms = dnms[(dnms["sample_id"] == args.sample_id) & (dnms["genotype"] != 0)]
+    
+    if "sample_id" in dnms.columns:
+        dnms = dnms[
+            (dnms["sample_id"].astype(str) == args.sample_id) & (dnms["genotype"] != 0)
+        ]
 
     # store output
     res = []
 
     SKIPPED, TOTAL_SITES = [], 0
-    for _, row in dnms.iterrows():
+    for _, row in tqdm.tqdm(dnms.iterrows()):
         # extract info about the DNM
         trid = row["trid"]
-        chrom, start, end = row["chrom"], row["start"], row["end"]
+        # chrom, start, end = row["chrom"], row["start"], row["end"]
+        try:
+            chrom, start, end, method = trid.split("_")
+        except ValueError:
+            continue
+
         region = f"{chrom}:{start}-{end}"
 
         # loop over VCF, allowing for slop to ensure we hit the STR
         for var in vcf(region):
             TOTAL_SITES += 1
             var_trid = var.INFO.get("TRID")
+
             assert var_trid == trid
 
             # concatenate the alleles at this locus
@@ -261,7 +270,6 @@ def main(args):
                 SKIPPED.append("Sample doesn't have an ALT allele")
                 continue
 
-
             # the difference between the AL fields at this locus represents the
             # expected expansion size of the STR.
             try:
@@ -280,6 +288,10 @@ def main(args):
                 SKIPPED.append("Allele lengths are identical")
                 continue
 
+            # calculate expected diffs between alleles and the refernece genome
+            exp_diff_alt = alt_al - len(var.REF)
+            exp_diff_ref = ref_al - len(var.REF)
+
             # loop over reads in the BAM for this individual
             # loop over reads in the BAMs
             for bam, label in zip(
@@ -292,13 +304,21 @@ def main(args):
                     diffs.append(0)
                 else:
                     for read in bam.fetch(chrom, int(start), int(end)):
-                        diff = get_read_diff(read, int(start), int(end))
+                        diff = get_read_diff(
+                            read,
+                            int(start),
+                            int(end),
+                            slop=max([abs(exp_diff_ref), abs(exp_diff_alt)]),
+                        )
                         if diff is None:
                             continue
                         else:
                             diffs.append(diff)
                 # count up all recorded diffs between reads and reference allele
                 diff_counts = Counter(diffs).most_common()
+
+                # total_reads = sum([v for k,v in diff_counts])
+                # if total_reads < 10: continue
 
                 for diff, count in diff_counts:
                     d = {
@@ -307,22 +327,19 @@ def main(args):
                         "motif": tr_motif,
                         "diff": diff,
                         "Read support": count,
-                        "ref_al": ref_al,
-                        "alt_al": alt_al,
-                        "In homopolymer?": row["is_homopolymer"],
-                        "exp_allele_diff_alt": alt_al - len(var.REF),
-                        "exp_allele_diff_ref": ref_al - len(var.REF),
+                        "exp_allele_diff_alt": exp_diff_alt,
+                        "exp_allele_diff_ref": exp_diff_ref,
                         "n_with_denovo_allele_strict": row[
                             "n_with_denovo_allele_strict"
-                        ],
+                        ] if "n_with_denovo_allele_strict" in row else 0,
                     }
                     res.append(d)
 
-    print(
-        "TOTAL sites: ",
-        dnms[dnms["sample_id"] == args.sample_id].shape[0],
-        TOTAL_SITES,
-    )
+    # print(
+    #     "TOTAL sites: ",
+    #     dnms[dnms["sample_id"] == args.sample_id].shape[0],
+    #     TOTAL_SITES,
+    # )
     for reason, count in Counter(SKIPPED).most_common():
         print(f"{reason}: {count}")
     res_df = pd.DataFrame(res)

@@ -8,6 +8,31 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 import tqdm
 import csv
+import cyvcf2
+import pysam
+from validate_dnms import get_read_diff
+from collections import Counter
+import scipy.stats as ss
+
+
+def query_vcf(
+    vcf: cyvcf2.VCF,
+    region: str,
+    trid: str,
+    ref_al: int,
+    alt_al: int,
+):
+    exp_diff_ref, exp_diff_alt = None, None
+
+    for var in vcf(region):
+        var_trid = var.INFO.get("TRID")
+        if trid != var_trid:
+            continue
+        # get information about a variant from a VCF
+        exp_diff_alt = alt_al - len(var.REF)
+        exp_diff_ref = ref_al - len(var.REF)
+
+    return exp_diff_ref, exp_diff_alt
 
 
 def apply_op(value: str, operation: Callable):
@@ -32,7 +57,7 @@ def calculate_ab(sd: str):
 plt.rc("font", size=12)
 
 
-N = 1_000_000
+N = 100_000
 
 
 FEATURES = [
@@ -46,6 +71,9 @@ FEATURES = [
     "kid AL diff.",
     "motif length",
     "is homopolymer",
+    # "element spanning reads",
+    # "element AB diff",
+    # "pass element",
 ]
 
 
@@ -70,6 +98,30 @@ HEADER = None
 # reference AL, diff in ALs
 # include kid genotype
 
+# TODO: add in element validation here!
+
+KID, MOM, DAD = "NA12879", "NA12878", "NA12877"
+
+VCF_PREF = "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/TRGT/GRCh38/dashnow/fd6baac/"
+BAM_PREF = (
+    "/scratch/ucgd/lustre-work/quinlan/u6055472/storage/elementbio/CEPH/complete/"
+)
+
+KID_VCF = cyvcf2.VCF(VCF_PREF + "2216_DM_GRCh38.sorted.vcf.gz", gts012=True)
+MOM_VCF = cyvcf2.VCF(VCF_PREF + "2188_DM_GRCh38.sorted.vcf.gz", gts012=True)
+DAD_VCF = cyvcf2.VCF(VCF_PREF + "2209_SF_GRCh38.sorted.vcf.gz", gts012=True)
+
+KID_BAM = pysam.AlignmentFile(BAM_PREF + "2216_1_merged_sort.bam", "rb")
+MOM_BAM = pysam.AlignmentFile(BAM_PREF + "2188_1_merged_sort.bam", "rb")
+DAD_BAM = pysam.AlignmentFile(BAM_PREF + "2209_2_merged_sort.bam", "rb")
+
+SMP2VCF = dict(zip([KID, MOM, DAD], [KID_VCF, MOM_VCF, DAD_VCF]))
+SMP2BAM = dict(zip([KID, MOM, DAD], [KID_BAM, MOM_BAM, DAD_BAM]))
+
+# NOTE: probably don't want to double count observations?
+
+STRICT = True
+
 with open(
     "/scratch/ucgd/lustre-work/quinlan/u0055382/src/CEPH-K1463-TandemRepeats/distance/GRCh38/dashnow/fd6baac/all.dists.sorted.txt",
     "r",
@@ -82,9 +134,94 @@ with open(
             HEADER = l
             continue
         v = dict(zip(HEADER, l))
-        # if li == 1:
-        #     for key, val in v.items():
-        #         print("\t".join([key, val]))
+
+        if v["kid_id"] not in SMP2VCF:
+            X[li - 1, :] = np.nan
+            y[li - 1] = np.nan
+            continue
+        if "pathogenic" in v["#variant"]:
+            X[li - 1, :] = np.nan
+            y[li - 1] = np.nan
+            continue
+
+        trid = v["#variant"]
+        chrom, start, end, _ = trid.split("_")
+        region = f"{chrom}:{start}-{end}"
+
+        try:
+            ref_al, alt_al = list(map(int, v["kid_AL"].split(",")))
+        except ValueError:
+            X[li - 1, :] = np.nan
+            y[li - 1] = np.nan
+            continue
+
+        sample_vcf = SMP2VCF[v["kid_id"]]
+
+        # use Element data to figure out allele balances in the focal sample
+        # first, get the expected read diffs to the reference
+
+        exp_allele_diff_ref, exp_allele_diff_alt = query_vcf(
+            sample_vcf,
+            region,
+            trid,
+            ref_al,
+            alt_al,
+        )
+
+        sample_bam = SMP2BAM[v["kid_id"]]
+
+        # then, query the BAMs to see if the reads support the expectation
+        diffs = []
+        for read in sample_bam.fetch(chrom, int(start), int(end)):
+            diff = get_read_diff(
+                read,
+                int(start),
+                int(end),
+                slop=max([abs(exp_allele_diff_ref), abs(exp_allele_diff_alt)]),
+            )
+            diffs.append(diff)
+
+        diff_counts = Counter(diffs).most_common()
+
+        # calculate element allele balance
+
+        # if homozygous...
+        spanning_reads = sum([v for k, v in diff_counts if k is not None])
+        match_ref, match_alt = 0, 0
+
+        match_ref = sum([v for k, v in diff_counts if k == exp_allele_diff_ref])
+        match_alt = sum([v for k, v in diff_counts if k == exp_allele_diff_alt])
+
+        ref_ab = match_ref / spanning_reads if spanning_reads > 0 else 0.
+        alt_ab = match_alt / spanning_reads if spanning_reads > 0 else 0.
+
+        # calculate "degree of support" for the specified call by
+        # performing a binomial test on the allele balance and asking
+        # if the p-value is < 0.05
+        element_ab_diff = 0
+
+        if exp_allele_diff_alt == exp_allele_diff_ref:
+            expected_p, alternative = 1.0, "less"
+            element_ab_diff += abs(ref_ab - expected_p)
+        else:
+            expected_p, alternative = 0.5, "two-sided"
+            element_ab_diff += abs(ref_ab - expected_p)
+            element_ab_diff += abs(alt_ab - expected_p)
+
+        #print (exp_allele_diff_ref, exp_allele_diff_alt, ref_ab, alt_ab, v["dist"], element_ab_diff)
+
+        # NOTE: confounder!!! if mendelian consistent calls are mostly HOM
+        # and violations are mostly HET, comparing allele balance diffs is
+        # not appropriate
+
+        p = ss.binom_test(
+            match_ref,
+            spanning_reads,
+            p=expected_p,
+            alternative=alternative,
+        )
+
+        pass_element_p = p > 0.05
 
         kid_ab, mom_ab, dad_ab = [
             calculate_ab(v[k]) for k in ("kid_SD", "mom_SD", "dad_SD")
@@ -103,7 +240,8 @@ with open(
 
         motif_lens = [len(m) for m in motifs]
         motif_len = min(motif_lens)
-        if motif_len == 0: print (motifs)
+        if motif_len == 0:
+            print(motifs)
 
         kid_dp, mom_dp, dad_dp = [
             apply_op(v[k], np.sum) for k in ("kid_SD", "mom_SD", "dad_SD")
@@ -125,16 +263,35 @@ with open(
                     kid_al_diff,
                     motif_len,
                     is_homopolymer,
+                    # spanning_reads,
+                    # element_ab_diff,
+                    # pass_element_p,
                 ],
             )
         ):
             X[li - 1, fi] = feat_val
 
+
+        # if strict, require both a dist of 0 and a passing element AB
         label = float(v["dist"])
-        y[li - 1] = int(label == 0)
+
+        class_label = None
+        if label == 0 and pass_element_p:
+            class_label = 1
+        elif label == 0 and (not pass_element_p):
+            class_label = None
+        else:
+            class_label = 0
+        
+        if class_label is None:
+            y[li - 1] = np.nan
+        else:
+            y[li - 1] = class_label
+        
 
 
 good_idxs = np.unique(np.where(np.all(~np.isnan(X), axis=1))[0])
+good_idxs = np.intersect1d(good_idxs, np.where(~np.isnan(y)))
 
 X = X[good_idxs]
 y = y[good_idxs].astype(np.int8)
@@ -142,14 +299,14 @@ y = y[good_idxs].astype(np.int8)
 # find TNs
 tn_idxs = np.where(y == 0)[0]
 tp_idxs = np.where(y == 1)[0]
-print (tn_idxs.shape[0], tp_idxs.shape[0])
-tp_idxs = np.random.choice(tp_idxs, size=tn_idxs.shape[0], replace=False)
+print(tn_idxs.shape[0], tp_idxs.shape[0])
+# tp_idxs = np.random.choice(tp_idxs, size=tn_idxs.shape[0], replace=False)
 idxs = np.concatenate((tn_idxs, tp_idxs))
 print(tp_idxs.shape[0])
 X = X[idxs]
 y = y[idxs]
 
-print (X[0])
+print(X[0])
 
 print(np.sum(y) / y.shape[0])
 
@@ -164,7 +321,7 @@ f.savefig("corr.png", dpi=200)
 
 X_train, X_test, y_train, y_test = train_test_split(X, y, shuffle=True, test_size=0.2)
 
-print (X_train.shape, X_test.shape)
+print(X_train.shape, X_test.shape)
 
 
 f, axarr = plt.subplots(
@@ -181,7 +338,6 @@ for fi, feat in enumerate(FEATURES):
     #     pctile = np.percentile(X_feat, q=99)
     #     print (pctile, feat)
     #     idxs = np.where(X_feat <= pctile)[0]
-        
 
     bins = np.linspace(np.min(X_feat), np.max(X_feat), num=100)
 
@@ -190,7 +346,7 @@ for fi, feat in enumerate(FEATURES):
         X_feat_sub = X_feat[y_i]
 
         # print (feat, y_, np.min(X_feat_sub), np.max(X_feat_sub))
-        
+
         # histogram
         histvals, edges = np.histogram(X_feat_sub, bins=bins)
         histfracs = histvals / np.sum(histvals)
@@ -198,9 +354,12 @@ for fi, feat in enumerate(FEATURES):
 
         label = "Consistent" if y_ == 1 else "Mendel. violation"
 
-        if feat != "is homopolymer":
+        if feat not in ("is homopolymer", "pass element"):
             axarr[fi, 0].plot(
-                bins[1:], cumsum, label=label, lw=2,
+                bins[1:],
+                cumsum,
+                label=label,
+                lw=2,
             )
             if feat in ("kid min. AL", "kid AL diff."):
                 axarr[fi, 0].set_xscale("log", base=10)
@@ -209,7 +368,9 @@ for fi, feat in enumerate(FEATURES):
             axarr[fi, 0].legend()
 
         else:
-            axarr[fi, 0].bar([y_], np.sum(X_feat_sub) / X_feat_sub.shape[0], 1, label=label)
+            axarr[fi, 0].bar(
+                [y_], np.sum(X_feat_sub) / X_feat_sub.shape[0], 1, label=label
+            )
             axarr[fi, 0].set_xticks([0, 1])
             axarr[fi, 0].set_xticklabels(["Mendelian viol.", "Consistent"])
             axarr[fi, 0].set_ylabel("Proportion of calls")
@@ -223,7 +384,7 @@ for fi, feat in enumerate(FEATURES):
         #     lw=2,
         # )
         axarr[fi, 0].set_title(f"Distribution of {feat} values in TRGT GRCh38 calls")
-        
+
         sns.despine(ax=axarr[fi, 0], top=True, right=True)
 
     # # ROC curve
@@ -234,7 +395,7 @@ for fi, feat in enumerate(FEATURES):
         fpr, tpr, thresholds = roc_curve(y, X_feat)
         auc = round(roc_auc_score(y, X_feat), 3)
 
-    #if feat == "kid AL diff.":
+    # if feat == "kid AL diff.":
     # print (feat, thresholds)
     axarr[fi, 1].plot(fpr, tpr, c="firebrick", lw=2)
     axarr[fi, 1].axline(xy1=(0, 0), slope=1, c="k", ls=":")
