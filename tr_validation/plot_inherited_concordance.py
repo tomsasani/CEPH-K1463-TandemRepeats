@@ -8,14 +8,14 @@ import numpy as np
 
 def classify_motif(motif: str):
     motif_len = len(motif)
-    if motif_len < 10:
-        return str(motif_len)
+    if motif_len < 5:
+        return motif_len
     else:
-        return "10+"
+        return 5
 
 
 def main():
-    genotype = "0_1"
+    genotype = "1_1"
     fh = f"tr_validation/csv/2216.{genotype}.inherited.read_support.csv"
     res_df = pd.read_csv(fh)
 
@@ -31,7 +31,9 @@ def main():
         res_df = res_df.query("diff != 0")
 
     res_df = res_df[res_df["Total read support"] >= 10]
-    res_df["Motif size"] = res_df["motif"].apply(lambda m: classify_motif(m))
+    res_df["Motif size"] = res_df["motif"].apply(lambda m: len(m))
+    res_df = res_df[res_df["Motif size"] <= 5]
+    #res_df["Motif size"] = res_df["Motif size"].apply(lambda m: m if m < 5 else 5)
 
     res_df["Matches ALT?"] = res_df["diff"] == res_df["exp_allele_diff_alt"]
     res_df["Matches REF?"] = res_df["diff"] == res_df["exp_allele_diff_ref"]
@@ -89,7 +91,7 @@ def main():
         x=x,
         y=y,
         col="sample",
-        row="Is homopolymer?",
+        row="Motif size",
         hue="Fraction of reads",
         s=100,
     )
@@ -107,10 +109,10 @@ def main():
         ax.set_ylabel(
             "Expected allele length difference\n(ALT vs. REF, using TRGT)",
         )
-    g.fig.suptitle(
-        "Concordance between Element and TRGT allele lengths at homozygous STRs present in all members of a trio",
-        fontsize=12,
-    )
+    # g.fig.suptitle(
+    #     "Concordance between Element and TRGT allele lengths at homozygous STRs present in all members of a trio",
+    #     fontsize=12,
+    # )
     g.tight_layout()
     g.savefig("conc.png", dpi=200)
 

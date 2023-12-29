@@ -21,7 +21,7 @@ rule all:
     input: 
         expand("tr_validation/csv/{sample}.dnm.read_support.csv", sample=["2189", "2216", "2188", "2209"]),
         expand("tr_validation/fig/{sample}.dnm.read_support.png", sample=["2189", "2216", "2188", "2209"]),
-        # expand("tr_validation/csv/{sample}.{genotype}.inherited.read_support.csv", sample=["2216", "2189"], genotype=["0_0", "0_1", "1_1"]),
+        #expand("tr_validation/csv/{sample}.{genotype}.inherited.read_support.csv", sample=["2216", "2189"], genotype=["0_0", "0_1", "1_1"]),
 
         # expand("tr_validation/csv/{sample}.{genotype}.inherited.read_support.csv", sample=["2216", "2189"], genotype=["0_0", "0_1", "1_1"])
         #expand("tr_validation/csv/{sample}.{genotype}.inherited.read_support.csv", sample=["2216"], genotype=["1_1"])
@@ -31,7 +31,7 @@ rule all:
 rule validate_dnms:
     input:
         py_script = "tr_validation/validate_dnms.py",
-        # dnms = "tr_validation/data/df_trgtdn_palladium_GRCh38_C0.parquet.gzip",
+        #dnms = "tr_validation/data/df_trgtdn_palladium_GRCh38_C0.parquet.gzip",
         dnms = "tr_validation/data/df_transmission_C5.parquet.gzip",
 
     output: "tr_validation/csv/{sample}.dnm.read_support.csv"

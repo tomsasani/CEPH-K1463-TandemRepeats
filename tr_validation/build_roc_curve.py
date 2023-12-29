@@ -185,8 +185,15 @@ with open(
 
         # calculate element allele balance
 
-        # if homozygous...
+        # make sure we only consider sites that *Could* be validated by
+        # element
         spanning_reads = sum([v for k, v in diff_counts if k is not None])
+
+        if spanning_reads < 10:
+            X[li - 1, :] = np.nan
+            y[li - 1] = np.nan
+            continue
+
         match_ref, match_alt = 0, 0
 
         match_ref = sum([v for k, v in diff_counts if k == exp_allele_diff_ref])
@@ -240,8 +247,10 @@ with open(
 
         motif_lens = [len(m) for m in motifs]
         motif_len = min(motif_lens)
-        if motif_len == 0:
-            print(motifs)
+        if motif_len != 1:
+            X[li - 1, :] = np.nan
+            y[li - 1] = np.nan
+            continue
 
         kid_dp, mom_dp, dad_dp = [
             apply_op(v[k], np.sum) for k in ("kid_SD", "mom_SD", "dad_SD")
@@ -361,8 +370,8 @@ for fi, feat in enumerate(FEATURES):
                 label=label,
                 lw=2,
             )
-            if feat in ("kid min. AL", "kid AL diff."):
-                axarr[fi, 0].set_xscale("log", base=10)
+            # if feat in ("kid min. AL", "kid AL diff."):
+            #     axarr[fi, 0].set_xscale("log", base=10)
             axarr[fi, 0].set_xlabel(f"{feat}")
             axarr[fi, 0].set_ylabel("Cumulative proportion of calls")
             axarr[fi, 0].legend()
