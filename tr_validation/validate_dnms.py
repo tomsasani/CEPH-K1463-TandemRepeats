@@ -54,37 +54,6 @@ def read_exclude(fh: str) -> IntervalTree:
     return tree
 
 
-def count_indel_in_read(ct: List[Tuple[int, int]]) -> int:
-    """count up inserted and deleted sequence in a read
-    using the pysam cigartuples object. a cigartuples object
-    is a list of tuples -- each tuple stores a CIGAR operation as
-    its first element and the number of bases attributed to that operation
-    as its second element. exact match is (0, N), where N is the number
-    of bases that match the reference, insertions are (1, N), and deletions
-    are (2, N).
-
-    Args:
-        ct (List[Tuple[int, int]]): cigartuples object from pysam aligned segment
-
-    Returns:
-        int: total in/del sequence (negative if net deleted, positive if net inserted)
-
-    >>> count_indel_in_read([(0, 50), (1, 4), (2, 3), (1, 1), (0, 90), (4, 2)])
-    2
-    >>> count_indel_in_read([(0, 50), (1, 4), (2, 3), (1, 7), (0, 10)])
-    8
-    >>> count_indel_in_read([(0, 150)])
-    0
-    """
-    total_indel = 0
-    for op, v in ct:
-        if op == 1:
-            total_indel += v
-        elif op == 2:
-            total_indel -= v
-    return total_indel
-
-
 def reformat_cigartuples(
     ct: Tuple[int, int],
     rs: int,
@@ -93,7 +62,14 @@ def reformat_cigartuples(
     ve: int,
     slop: int = 20,
 ):
-    """_summary_
+    """count up inserted and deleted sequence in a read
+    using the pysam cigartuples object. a cigartuples object
+    is a list of tuples -- each tuple stores a CIGAR operation as
+    its first element and the number of bases attributed to that operation
+    as its second element. exact match is (0, N), where N is the number
+    of bases that match the reference, insertions are (1, N), and deletions
+    are (2, N). we only count CIGAR operations that completely overlap
+    the expected STR locus interval (+/- the size of the STR expansion).
 
     Args:
         ct (Tuple[int, int]): _description_
@@ -131,8 +107,6 @@ def reformat_cigartuples(
             indel_ops += 1
         elif op == 2:
             indel_ops -= 1
-        # elif op in (4, 5):
-        #     indel_ops += 1
         else: continue
 
     return indel_ops
@@ -142,7 +116,7 @@ def get_read_diff(
     read: pysam.AlignedSegment,
     start: int,
     end: int,
-    min_mapq: int = 20,
+    min_mapq: int = 10,
     slop: int = 0,
 ) -> Union[None, int]:
     """compare a single sequencing read and to the reference. then,
@@ -163,6 +137,7 @@ def get_read_diff(
         return None
     
     qs, qe = read.reference_start, read.reference_end
+    
     # ensure that this read completely overlaps the expected repeat expansion.
     # NOTE: we are *very* stringent when considering reads, and only include
     # reads that align completely across the reported variant location +/-
@@ -185,11 +160,9 @@ def get_read_diff(
 
 def main(args):
     # read in de novo parquet file and VCF
-    dnms = pd.read_csv(args.dnms) if args.dnms.endswith("csv") else pd.read_parquet(args.dnms) 
+    dnms = pd.read_csv(args.dnms) if args.dnms.endswith(".csv") else pd.read_parquet(args.dnms) 
 
-    # dnms = dnms.sample(10_000, replace=False)
-
-    # count DNMs observed in
+    # figure out the number of times a DNM is observed in the dataset
     num_obs = (
         dnms.groupby("trid")
         .size()
@@ -198,7 +171,6 @@ def main(args):
         .rename(columns={0: "num_obs"})
     )
     dnms = dnms.merge(num_obs, on="trid")
-    # dnms = dnms.query("num_obs == 1")
 
     vcf = VCF(args.vcf, gts012=True)
 
@@ -228,6 +200,8 @@ def main(args):
         dnms = dnms[
             (dnms["sample_id"].astype(str) == args.sample_id) & (dnms["genotype"] != 0)
         ]
+    else:
+        dnms["sample_id"] = args.sample_id
 
     # store output
     res = []
@@ -236,9 +210,8 @@ def main(args):
     for _, row in tqdm.tqdm(dnms.iterrows()):
         # extract info about the DNM
         trid = row["trid"]
-        # chrom, start, end = row["chrom"], row["start"], row["end"]
         try:
-            chrom, start, end, method = trid.split("_")
+            chrom, start, end, _ = trid.split("_")
         except ValueError:
             continue
 
@@ -314,11 +287,9 @@ def main(args):
                             continue
                         else:
                             diffs.append(diff)
+
                 # count up all recorded diffs between reads and reference allele
                 diff_counts = Counter(diffs).most_common()
-
-                # total_reads = sum([v for k,v in diff_counts])
-                # if total_reads < 10: continue
 
                 for diff, count in diff_counts:
                     d = {
@@ -335,11 +306,11 @@ def main(args):
                     }
                     res.append(d)
 
-    # print(
-    #     "TOTAL sites: ",
-    #     dnms[dnms["sample_id"] == args.sample_id].shape[0],
-    #     TOTAL_SITES,
-    # )
+    print(
+        "TOTAL sites: ",
+        dnms[dnms["sample_id"] == args.sample_id].shape[0],
+        TOTAL_SITES,
+    )
     for reason, count in Counter(SKIPPED).most_common():
         print(f"{reason}: {count}")
     res_df = pd.DataFrame(res)
