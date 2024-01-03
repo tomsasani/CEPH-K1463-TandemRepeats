@@ -5,20 +5,22 @@ import argparse
 import itertools
 import numpy as np
 
+plt.rc("font", size=14)
+
 
 def classify_motif(motif: str):
     motif_len = len(motif)
-    if motif_len < 5:
+    if motif_len < 6:
         return motif_len
     else:
-        return 5
+        return 6
 
 
 def main():
-    genotype = "1_1"
+    genotype = "0_1"
     fh = f"tr_validation/csv/2216.{genotype}.inherited.read_support.csv"
     res_df = pd.read_csv(fh)
-
+    
     region_sums = (
         res_df.groupby(["sample", "trid"])
         .agg({"Read support": "sum"})
@@ -27,13 +29,14 @@ def main():
     )
     res_df = res_df.merge(region_sums, on=["sample", "trid"])
 
+    
+
     if "0_1" in fh:
         res_df = res_df.query("diff != 0")
 
     res_df = res_df[res_df["Total read support"] >= 10]
     res_df["Motif size"] = res_df["motif"].apply(lambda m: len(m))
-    res_df = res_df[res_df["Motif size"] <= 5]
-    #res_df["Motif size"] = res_df["Motif size"].apply(lambda m: m if m < 5 else 5)
+    res_df = res_df[res_df["Motif size"] <= 10]
 
     res_df["Matches ALT?"] = res_df["diff"] == res_df["exp_allele_diff_alt"]
     res_df["Matches REF?"] = res_df["diff"] == res_df["exp_allele_diff_ref"]
@@ -47,8 +50,8 @@ def main():
 
 
     order = sorted(res_df["Motif size"].unique())
-    order = list(map(str, range(1, 10)))
-    order.append("10+")
+    # order = list(map(str, range(1, 10)))
+    # order.append("10+")
 
     # just plot the fractions of reads that exactly support the ALT allele
     g = sns.FacetGrid(
@@ -82,6 +85,11 @@ def main():
     g.tight_layout()
     g.savefig("test.png", dpi=200)
 
+    res_df = res_df[res_df["sample"] == "kid"]
+
+
+    print (res_df[res_df["exp_allele_diff_alt"] > 40][["trid", "diff", "exp_allele_diff_ref", "exp_allele_diff_alt"]])
+
     res_df["Is homopolymer?"] = res_df["motif"].apply(lambda m: len(m) == 1)
 
     x, y = "diff", "exp_allele_diff_alt"
@@ -90,10 +98,11 @@ def main():
         data=res_df,
         x=x,
         y=y,
-        col="sample",
-        row="Motif size",
+        col="Motif size",
         hue="Fraction of reads",
+        alpha=1,
         s=100,
+        col_wrap=5,
     )
     g.map(plt.axline, xy1=(0, 0), slope=1, ls=":", c="k", lw=2, zorder=-1)
 
