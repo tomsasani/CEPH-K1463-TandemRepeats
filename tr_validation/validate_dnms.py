@@ -116,7 +116,7 @@ def get_read_diff(
     read: pysam.AlignedSegment,
     start: int,
     end: int,
-    min_mapq: int = 10,
+    min_mapq: int = 20,
     slop: int = 0,
 ) -> Union[None, int]:
     """compare a single sequencing read and to the reference. then,
@@ -162,6 +162,8 @@ def main(args):
     # read in de novo parquet file and VCF
     dnms = pd.read_csv(args.dnms) if args.dnms.endswith(".csv") else pd.read_parquet(args.dnms) 
 
+
+
     # figure out the number of times a DNM is observed in the dataset
     num_obs = (
         dnms.groupby("trid")
@@ -203,6 +205,8 @@ def main(args):
     else:
         dnms["sample_id"] = args.sample_id
 
+    # dnms = dnms.sample(1_000, replace=False)
+
     # store output
     res = []
 
@@ -237,11 +241,11 @@ def main(args):
                 continue
             tr_motif = tr_motif[0]
 
-            # figure out the genotype of this sample
-            gt = var.genotypes
-            if gt[0] == 0:
-                SKIPPED.append("Sample doesn't have an ALT allele")
-                continue
+            # # figure out the genotype of this sample
+            # gt = var.genotypes
+            # if gt[0] == 0:
+            #     SKIPPED.append("Sample doesn't have an ALT allele")
+            #     continue
 
             # the difference between the AL fields at this locus represents the
             # expected expansion size of the STR.
@@ -253,13 +257,13 @@ def main(args):
 
             # if the total length of the allele is greater than the length of
             # a typical element read, move on
-            if alt_al > 150:
-                SKIPPED.append("ALT allele length > 150 bp")
-                continue
+            # if alt_al > 150:
+            #     SKIPPED.append("ALT allele length > 150 bp")
+            #     continue
 
-            if alt_al - ref_al == 0:
-                SKIPPED.append("Allele lengths are identical")
-                continue
+            # if alt_al - ref_al == 0:
+            #     SKIPPED.append("Allele lengths are identical")
+            #     continue
 
             # calculate expected diffs between alleles and the refernece genome
             exp_diff_alt = alt_al - len(var.REF)
