@@ -21,6 +21,33 @@ plt.rc("font", size=14)
 
 RC = {"A": "T", "T": "A", "C": "G", "G": "C", "N": "N"}
 
+def count_indel_in_read(ct: List[Tuple[int, int]]) -> int:
+    """count up inserted and deleted sequence in a read
+    using the pysam cigartuples object.
+    using the pysam cigartuples object. a cigartuples object
+    is a list of tuples -- each tuple stores a CIGAR operation as
+    its first element and the number of bases attributed to that operation
+    as its second element. exact match is (0, N), where N is the number
+    of bases that match the reference, insertions are (1, N), and deletions
+    are (2, N).
+    Args:
+        ct (List[Tuple[int, int]]): cigartuples object from pysam aligned segment
+    Returns:
+        int: total in/del sequence (negative if net deleted, positive if net inserted)
+    >>> count_indel_in_read([(0, 50), (1, 4), (2, 3), (1, 1), (0, 90), (4, 2)])
+    2
+    >>> count_indel_in_read([(0, 50), (1, 4), (2, 3), (1, 7), (0, 10)])
+    8
+    >>> count_indel_in_read([(0, 150)])
+    0
+    """
+    total_indel = 0
+    for op, v in ct:
+        if op == 1:
+            total_indel += v
+        elif op == 2:
+            total_indel -= v
+    return total_indel
 
 def read_exclude(fh: str) -> IntervalTree:
     """
@@ -94,6 +121,8 @@ def reformat_cigartuples(
     assert vs < ve
 
     read_arr = set(range(rs, re))
+    # add slop to the variant location, since the coordinates
+    # might be off by a bit
     var_arr = set(range(vs - slop, ve + slop))
     overlap_arr = list(read_arr.intersection(var_arr))
 
@@ -132,6 +161,14 @@ def get_read_diff(
     Returns:
         Union[None, int]: _description_
     """
+
+    # NOTE: the starts and ends of the read (w/r/t the reference)
+    # are reported by pysam as 0-based. the variant start
+    # and end (extracted from the TRID field) also appear to be 0-based.
+    # however, the TRID starts and ends sometimes are off by a handful
+    # of bps, so we add a bit of slop (in addition to the user-defined slop)
+    #slop_adj = slop + 5
+
     # initial filter on mapping quality
     if read.mapping_quality < min_mapq:
         return None
@@ -147,12 +184,17 @@ def get_read_diff(
     # completely across the interval chr1:40-70.
     if qs > (start - slop) or qe < (end + slop):
         return None
-
+    
     # query the CIGAR string in the read.
     ct = read.cigartuples
     # we can simply count up the indel content of the read (w/r/t what's in the
     # reference genome) as a proxy for expanded/deleted sequence.
     diff = reformat_cigartuples(ct, qs, qe, start, end, slop=slop)
+    #diff = count_indel_in_read(ct)
+    #diff = None
+    # if "2318:1394" in read.query_name:
+    #     diff = reformat_cigartuples(ct, qs, qe, start, end, slop=slop)
+    #     print ("###", slop, diff)
     
     return diff
 
@@ -161,8 +203,7 @@ def get_read_diff(
 def main(args):
     # read in de novo parquet file and VCF
     dnms = pd.read_csv(args.dnms) if args.dnms.endswith(".csv") else pd.read_parquet(args.dnms) 
-
-
+    dnms = dnms[dnms["chrom"] != "chrX"]
 
     # figure out the number of times a DNM is observed in the dataset
     num_obs = (
@@ -216,6 +257,7 @@ def main(args):
         trid = row["trid"]
         try:
             chrom, start, end, _ = trid.split("_")
+            start, end = int(start) - 1, int(end)
         except ValueError:
             continue
 
@@ -253,6 +295,8 @@ def main(args):
                 ref_al, alt_al = var.format("AL")[0]
             except ValueError:
                 SKIPPED.append("invalid AL field")
+                print (var)
+                print (row)
                 continue
 
             # if the total length of the allele is greater than the length of
@@ -280,11 +324,11 @@ def main(args):
                 if bam is None:
                     diffs.append(0)
                 else:
-                    for read in bam.fetch(chrom, int(start), int(end)):
+                    for read in bam.fetch(chrom, start, end):
                         diff = get_read_diff(
                             read,
-                            int(start),
-                            int(end),
+                            start,
+                            end,
                             slop=max([abs(exp_diff_ref), abs(exp_diff_alt)]),
                         )
                         if diff is None:

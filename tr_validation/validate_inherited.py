@@ -1,21 +1,10 @@
 from cyvcf2 import VCF
 import pysam
-from collections import Counter, defaultdict
+from collections import Counter
 import pandas as pd
 import matplotlib.pyplot as plt
-import seaborn as sns
-import numpy as np
-import gzip
-from bx.intervals.intersection import Interval, IntervalTree
-import csv
 import tqdm
-import re
-from typing import Tuple, List, Union
-from Bio import Align
-import matplotlib.patches as patches
-import cyvcf2
 import argparse
-import doctest
 from validate_dnms import get_read_diff
 
 
@@ -43,8 +32,11 @@ def main(args):
     )
 
     # randomly sample 10_000
-    mutations = mutations.sample(5_000, replace=False)
-    print (mutations)
+
+    #mutations = mutations[mutations["trid"] == "chr9_83786544_83786584_trsolve"]
+    mutations = mutations.sample(1_000, replace=False)
+    #print(mutations)
+
 
     # read in VCF for one sample so we can access AL info
     vcf = VCF(args.vcf, gts012=True)
@@ -53,12 +45,16 @@ def main(args):
     res = []
     SKIPPED = []
 
+    sizes = []
+
     for _, row in tqdm.tqdm(mutations.iterrows()):
         # extract info about the DNM
         trid = row["trid"]
 
         try:
             chrom, start, end, _ = trid.split("_")
+            start, end = int(start), int(end)
+            sizes.append(end - start)
         except ValueError:
             continue
 
@@ -69,6 +65,7 @@ def main(args):
 
         for var in vcf(region):
             var_trid = var.INFO.get("TRID")
+
 
             if var_trid != trid:
                 continue
@@ -88,13 +85,19 @@ def main(args):
             except ValueError:
                 SKIPPED.append("invalid AL field")
                 continue
+            
+            if ref_al > 150: 
+                SKIPPED.append("AL > 150bp")
+                continue
 
         if ref_al is None or alt_al is None:
             continue
 
+
         # calculate expected diffs between alleles and the refernece genome
         exp_diff_alt = alt_al - len(var.REF)
         exp_diff_ref = ref_al - len(var.REF)
+
 
         # loop over reads in the BAMs
         for bam, label in zip(
@@ -102,13 +105,14 @@ def main(args):
             ("mom", "dad", "kid"),
         ):
             diffs = []
-            for read in bam.fetch(chrom, int(start), int(end)):
+            for read in bam.fetch(chrom, start, end):
                 diff = get_read_diff(
                     read,
-                    int(start),
-                    int(end),
+                    start,
+                    end,
                     slop=max([abs(exp_diff_ref), abs(exp_diff_alt)]),
                 )
+
                 if diff is None:
                     continue
                 else:
@@ -130,6 +134,11 @@ def main(args):
                     "exp_allele_diff_ref": exp_diff_ref,
                 }
                 res.append(d)
+    
+    for reason, count in Counter(SKIPPED).most_common():
+        print(f"{reason}: {count}")
+
+    print (min(sizes), max(sizes))
 
     res_df = pd.DataFrame(res)
     res_df.to_csv(args.out)
