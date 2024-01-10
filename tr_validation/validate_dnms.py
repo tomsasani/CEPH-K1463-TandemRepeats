@@ -21,6 +21,7 @@ plt.rc("font", size=14)
 
 RC = {"A": "T", "T": "A", "C": "G", "G": "C", "N": "N"}
 
+
 def count_indel_in_read(ct: List[Tuple[int, int]]) -> int:
     """count up inserted and deleted sequence in a read
     using the pysam cigartuples object.
@@ -48,6 +49,7 @@ def count_indel_in_read(ct: List[Tuple[int, int]]) -> int:
         elif op == 2:
             total_indel -= v
     return total_indel
+
 
 def read_exclude(fh: str) -> IntervalTree:
     """
@@ -136,7 +138,8 @@ def reformat_cigartuples(
             indel_ops += 1
         elif op == 2:
             indel_ops -= 1
-        else: continue
+        else:
+            continue
 
     return indel_ops
 
@@ -167,43 +170,73 @@ def get_read_diff(
     # and end (extracted from the TRID field) also appear to be 0-based.
     # however, the TRID starts and ends sometimes are off by a handful
     # of bps, so we add a bit of slop (in addition to the user-defined slop)
-    #slop_adj = slop + 5
+    # slop_adj = slop + 5
 
     # initial filter on mapping quality
     if read.mapping_quality < min_mapq:
         return None
-    
+
     qs, qe = read.reference_start, read.reference_end
-    
+
     # ensure that this read completely overlaps the expected repeat expansion.
     # NOTE: we are *very* stringent when considering reads, and only include
     # reads that align completely across the reported variant location +/-
-    # the expected size of the expanded allele. for example, if the location 
+    # the expected size of the expanded allele. for example, if the location
     # of the reference STR is reported in the VCF as chr1:50-60 and we expect
     # the expansion to be 10bp in size, we only consider reads that align
     # completely across the interval chr1:40-70.
     if qs > (start - slop) or qe < (end + slop):
         return None
-    
+
     # query the CIGAR string in the read.
     ct = read.cigartuples
     # we can simply count up the indel content of the read (w/r/t what's in the
     # reference genome) as a proxy for expanded/deleted sequence.
     diff = reformat_cigartuples(ct, qs, qe, start, end, slop=slop)
-    #diff = count_indel_in_read(ct)
-    #diff = None
+    # diff = count_indel_in_read(ct)
+    # diff = None
     # if "2318:1394" in read.query_name:
     #     diff = reformat_cigartuples(ct, qs, qe, start, end, slop=slop)
     #     print ("###", slop, diff)
-    
-    return diff
 
+    return diff
 
 
 def main(args):
     # read in de novo parquet file and VCF
-    dnms = pd.read_csv(args.dnms) if args.dnms.endswith(".csv") else pd.read_parquet(args.dnms) 
-    dnms = dnms[dnms["chrom"] != "chrX"]
+    dnms = (
+        pd.read_csv(args.dnms)
+        if args.dnms.endswith(".csv")
+        else pd.read_parquet(args.dnms)
+    )
+
+    
+    # basic filtering to ensure we're looking at actual DNMs
+    dnms = dnms[
+        (dnms["sample_id"].astype(str) == args.sample_id)
+        & (dnms["denovo_status"].str.contains("Y"))
+    ]
+    # remove sex chromosomes
+    if "chrom" in dnms.columns:
+        dnms = dnms[dnms["chrom"] != "chrX"]
+    else:
+        dnms["chrom"] = dnms["trid"].apply(lambda t: t.split("_")[0])
+        dnms = dnms[dnms["chrom"] != "chrX"]
+
+
+    # if we have a coverage column, filter to depth >= 10 in all members of trio
+    if "child_coverage" in dnms.columns:
+        dnms["father_coverage"] = dnms["per_allele_reads_father"].apply(
+            lambda a: sum(list(map(int, a.split(","))))
+        )
+        dnms["mother_coverage"] = dnms["per_allele_reads_mother"].apply(
+            lambda a: sum(list(map(int, a.split(","))))
+        )
+        dnms = dnms[
+            (dnms["child_coverage"] >= 10)
+            & (dnms["father_coverage"] >= 10)
+            & (dnms["mother_coverage"] >= 10)
+        ]
 
     # figure out the number of times a DNM is observed in the dataset
     num_obs = (
@@ -238,18 +271,11 @@ def main(args):
         if args.mom_bam != "None"
         else None
     )
-    
-    if "sample_id" in dnms.columns:
-        dnms = dnms[
-            (dnms["sample_id"].astype(str) == args.sample_id) & (dnms["genotype"] != 0)
-        ]
-    else:
-        dnms["sample_id"] = args.sample_id
-
-    # dnms = dnms.sample(1_000, replace=False)
 
     # store output
     res = []
+
+    allele_balances = []
 
     SKIPPED, TOTAL_SITES = [], 0
     for _, row in tqdm.tqdm(dnms.iterrows()):
@@ -270,6 +296,9 @@ def main(args):
 
             assert var_trid == trid
 
+            per_allele_reads = list(map(int, row["per_allele_reads_child"].split(",")))
+            allele_balance = per_allele_reads[0] / sum(per_allele_reads)
+            allele_balances.append(allele_balance)
             # concatenate the alleles at this locus
             alleles = [var.REF]
             alleles.extend(var.ALT)
@@ -284,10 +313,10 @@ def main(args):
             tr_motif = tr_motif[0]
 
             # # figure out the genotype of this sample
-            # gt = var.genotypes
-            # if gt[0] == 0:
-            #     SKIPPED.append("Sample doesn't have an ALT allele")
-            #     continue
+            gt = var.genotypes
+            if gt[0] == 0:
+                SKIPPED.append("Sample doesn't have an ALT allele")
+                continue
 
             # the difference between the AL fields at this locus represents the
             # expected expansion size of the STR.
@@ -295,19 +324,17 @@ def main(args):
                 ref_al, alt_al = var.format("AL")[0]
             except ValueError:
                 SKIPPED.append("invalid AL field")
-                print (var)
-                print (row)
                 continue
 
             # if the total length of the allele is greater than the length of
             # a typical element read, move on
-            # if alt_al > 150:
-            #     SKIPPED.append("ALT allele length > 150 bp")
-            #     continue
+            if alt_al > 150:
+                SKIPPED.append("ALT allele length > 150 bp")
+                continue
 
-            # if alt_al - ref_al == 0:
-            #     SKIPPED.append("Allele lengths are identical")
-            #     continue
+            if alt_al - ref_al == 0:
+                SKIPPED.append("Allele lengths are identical")
+                continue
 
             # calculate expected diffs between alleles and the refernece genome
             exp_diff_alt = alt_al - len(var.REF)
@@ -350,9 +377,19 @@ def main(args):
                         "exp_allele_diff_ref": exp_diff_ref,
                         "n_with_denovo_allele_strict": row[
                             "n_with_denovo_allele_strict"
-                        ] if "n_with_denovo_allele_strict" in row else 0,
+                        ]
+                        if "n_with_denovo_allele_strict" in row
+                        else 0,
                     }
                     res.append(d)
+
+    f, ax = plt.subplots()
+    ax.hist(allele_balances, bins=np.arange(0, 1, 0.05), ec="k", lw=1)
+    sns.despine(ax=ax, top=True, right=True)
+    ax.set_xlabel("Allele balance")
+    ax.set_ylabel("Count")
+    f.tight_layout()
+    f.savefig("ab.png", dpi=200)
 
     print(
         "TOTAL sites: ",
