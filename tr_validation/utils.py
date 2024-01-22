@@ -1,4 +1,4 @@
-from collections import defaultdict
+from collections import Counter
 from typing import Tuple, Union
 
 import pysam
@@ -103,6 +103,28 @@ def get_read_diff(
     # query the CIGAR string in the read.
     ct = read.cigartuples
 
-    diff = count_indel_in_read(ct, qs, qe, start, end, slop=slop)
+    diff = count_indel_in_read(ct, qs, start, end, slop=slop)
 
     return diff
+
+def extract_diffs_from_bam(bam: pysam.AlignmentFile, chrom: str, start: int, end: int, ref_al_diff: int, alt_al_diff: int):
+    diffs = []
+
+    if bam is None:
+        diffs.append(0)
+    else:
+        for read in bam.fetch(chrom, start, end):
+            diff = get_read_diff(
+                read,
+                start,
+                end,
+                slop=max([abs(ref_al_diff), abs(alt_al_diff)]),
+            )
+            if diff is None:
+                continue
+            else:
+                diffs.append(diff)
+
+    # count up all recorded diffs between reads and reference allele
+    diff_counts = Counter(diffs).most_common()
+    return diff_counts
