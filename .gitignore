@@ -1,3 +1,4 @@
-tr_validation/data/
 .snakemake/
 exphunt/
+tr_validation/csv/
+tr_validation/fig/
