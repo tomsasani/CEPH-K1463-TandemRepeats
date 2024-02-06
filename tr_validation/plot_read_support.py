@@ -36,23 +36,28 @@ def compute_nanmean(a: np.ndarray, row: bool = True) -> np.ndarray:
 
 @numba.njit(parallel=True)
 def bootstrap(X: np.ndarray, n: int = 100):
-    means = np.zeros((n, X.shape[1]))
+    bootstrapped = np.zeros((n, X.shape[0], X.shape[1]))
 
     i = X.shape[0]
     for boot_i in numba.prange(n):
         idxs = np.random.randint(0, i, size=i)
         resampled = X[idxs, :]
-        mean = compute_nanmean(resampled, row=False)
-        means[boot_i, :] = mean
-    return means
+        bootstrapped[boot_i, :, :] = resampled
+    return bootstrapped
 
 
 def classify_motif(motif: str):
-    motif_len = len(motif)
-    if motif_len < 5:
-        return str(motif_len)
+    motifs = motif.split(",")
+    if len(motifs) == 1:
+        if len(motifs[0]) == 1:
+            return "homopolymer"
+        else:
+            return "non-homopolymer"
     else:
-        return "5+"
+        # if any([len(m) for m in motifs]) == 1:
+        #     return "contains homopolymer"
+        # else:
+        return "non-homopolymer"
 
 
 def calculate_min_dist(row: pd.Series):
@@ -79,9 +84,18 @@ def main(args):
 
     res_df = pd.read_csv(args.csv)
 
-    # add a homopolymer column if it's not in there
-    if "Is homopolymer?" not in res_df:
-        res_df["Is homopolymer?"] = res_df["motif"].apply(lambda m: len(m) == 1)
+    # add a transmission column if it's not in there
+    if "n_with_denovo_allele_strict" in res_df.columns:
+        res_df["Is transmitted?"] = res_df["n_with_denovo_allele_strict"].apply(
+            lambda n: "transmitted" if n > 0 else "untransmitted"
+        )
+    else:
+        res_df["Is transmitted?"] = "unknown"
+
+    res_df["exp_diff"] = res_df["exp_allele_diff_ref"] - res_df["exp_allele_diff_alt"]
+    res_df = res_df.query("exp_diff != 0")
+
+    res_df["Motif type"] = res_df["motif"].apply(lambda m: classify_motif(m))
 
     # for each read, calculate the minimum distance to either the REF or ALT allele
     # (i.e., the "closest" allele)
@@ -108,60 +122,132 @@ def main(args):
     # require at least 10 total spanning reads
     kid_df = kid_df[kid_df["Total read support"] >= 10]
 
-    col = "measured_allele_length_error"
+    val_col = "measured_allele_length_error"
 
-    f, axarr = plt.subplots(2, 2, sharex=True, sharey=False, figsize=(12, 6))
+    if args.tech == "ont":
+        kid_df = kid_df[(kid_df[val_col] >= -100) & (kid_df[val_col] <= 100)]
 
-    group2ax = {
-        ("REF", True): (0, 0),
-        ("REF", False): (0, 1),
-        ("ALT", True): (1, 0),
-        ("ALT", False): (1, 1),
-    }
+    row_col, col_col, group_col = "Is transmitted?", "is_ref", "Motif type"
 
-    for sub, kid_df_sub in kid_df.groupby(["is_ref", "Is homopolymer?"]):
-        is_ref, is_homo = sub
-        ax_i, ax_j = group2ax[(is_ref, is_homo)]
+    row_vals, col_vals = kid_df[row_col].unique(), kid_df[col_col].unique()
+    row2idx, col2idx = dict(zip(row_vals, range(len(row_vals)))), dict(
+        zip(col_vals, range(len(col_vals))),
+    )
 
+    f1, axarr1 = plt.subplots(
+        len(row_vals),
+        len(col_vals),
+        sharex=True,
+        sharey=True,
+        figsize=(12, 7),
+    )
+
+    f2, axarr2 = plt.subplots(
+        len(row_vals),
+        len(col_vals),
+        sharex=True,
+        sharey=True,
+        figsize=(12, 7),
+    )
+
+    for sub, kid_df_sub in kid_df.groupby([row_col, col_col, group_col]):
+        row_val, col_val, group_val = sub
+        ax_i, ax_j = row2idx[row_val], col2idx[col_val]
+        if kid_df_sub.shape[0] <= 1: continue
+
+        
         # figure out min and max of error
-        emin, emax = kid_df_sub[col].min(), kid_df_sub[col].max()
+        emin, emax = kid_df_sub[val_col].min(), kid_df_sub[val_col].max()
+
         # and number of loci
         n_loci = kid_df_sub["region"].nunique()
         loc2idx = dict(zip(kid_df_sub["region"].unique(), range(n_loci)))
         kid_df_sub["region_idx"] = kid_df_sub["region"].apply(lambda r: loc2idx[r])
 
+        # if col_val == "ALT" and group_val == "homopolymer":
+        #     print (kid_df_sub[(kid_df_sub[val_col] == 0) & (kid_df_sub["Read support"] > 5)])
+
         arr = np.zeros((n_loci, emax - emin), dtype=np.int16)
 
         # increment the array
         region_idxs = kid_df_sub["region_idx"].values
-        measured_al_idxs = kid_df_sub[col].values - emin - 1
+        measured_al_idxs = kid_df_sub[val_col].values - emin - 1
         vals = kid_df_sub["Read support"].values
 
         arr[region_idxs, measured_al_idxs] = vals
 
         arr_sums = np.nansum(arr, axis=1)
         arr_fracs = arr / arr_sums.reshape(-1, 1)
+        bootstrap_fracs = bootstrap(arr_fracs, n=args.n_bootstraps)
 
-        bs_fracs = bootstrap(arr_fracs)
-        bs_fracs_l = np.nanpercentile(bs_fracs, q=2.5, axis=0)
-        bs_fracs_u = np.nanpercentile(bs_fracs, q=97.5, axis=0)
+        # measure fraction of loci at which X% of reads perfectly support the allele
+        n_pass_loci = np.sum(arr_fracs[:, 0 - emin - 1] >= 0.5)
+        frac_pass_loci = round(100 * n_pass_loci / arr_fracs.shape[0], 1)
+
+        xvals = np.arange(0, 1.01, 0.01)
+        yvals = np.zeros(xvals.shape[0])
+        yvals_l, yvals_u = np.zeros(xvals.shape[0]), np.zeros(xvals.shape[0])
+        for i, pct in enumerate(xvals):
+            n_pass_loci = np.sum(arr_fracs[:, 0 - emin - 1] >= pct)
+            yval = n_pass_loci / arr_fracs.shape[0]
+            n_pass_loci_bs = np.sum(bootstrap_fracs[:, :, 0 - emin - 1] >= pct, axis=1)
+            frac_pass_loci_bs = n_pass_loci_bs / arr_fracs.shape[0]
+            yval_l = np.percentile(frac_pass_loci_bs, q=2.5)
+            yval_u = np.percentile(frac_pass_loci_bs, q=97.5)
+            yvals[i] = yval
+            yvals_l[i] = yval_l
+            yvals_u[i] = yval_u
+
+        axarr2[ax_i, ax_j].plot(xvals, yvals, label=f"{group_val} (n = {kid_df_sub.shape[0]})")
+        axarr2[ax_i, ax_j].fill_between(xvals, yvals_l, yvals_u, alpha=0.25)
+
+        axarr2[ax_i, ax_j].set_xlabel(
+            "Fraction of reads that perfectly support the exp. AL"
+        )
+        axarr2[ax_i, ax_j].set_ylabel("Fraction of loci")
+        axarr2[ax_i, ax_j].set_title(
+            f"Read support for the {col_val} allele at {row_val} loci"
+        )
+        axarr2[ax_i, ax_j].legend(title="Motif type", frameon=False)
+        sns.despine(ax=axarr2[ax_i, ax_j], top=True, right=True)
+
+        # bootstrap_means = np.nanmean(bootstrap_fracs, axis=(0, 1))
+        bs_fracs_l = np.nanpercentile(
+            np.nanmean(bootstrap_fracs, axis=1), q=2.5, axis=0
+        )
+        bs_fracs_u = np.nanpercentile(
+            np.nanmean(bootstrap_fracs, axis=1), q=97.5, axis=0
+        )
 
         x = np.arange(emin, emax) + 1
 
-        axarr[ax_i, ax_j].plot(x, np.nanmean(arr_fracs, axis=0), c="grey")
-        axarr[ax_i, ax_j].fill_between(
-            x, bs_fracs_l, bs_fracs_u, alpha=0.75, color="gainsboro"
+        axarr1[ax_i, ax_j].plot(x, np.nanmean(arr_fracs, axis=0), label=f"{group_val} (n = {kid_df_sub.shape[0]})")
+        axarr1[ax_i, ax_j].fill_between(
+            x,
+            bs_fracs_l,
+            bs_fracs_u,
+            alpha=0.25,  # color="gainsboro"
         )
 
-        axarr[ax_i, ax_j].set_xlabel("Difference between Element and TRGT AL (bp)")
-        axarr[ax_i, ax_j].set_ylabel("Fraction of reads at a locus")
-        homopol_status = "homopolymers" if is_homo else "non-homopolymers"
-        axarr[ax_i, ax_j].set_title(
-            f"Reads supporting the\n{is_ref} allele at {homopol_status}"
+        if ax_i == len(row_vals) - 1:
+            axarr1[ax_i, ax_j].set_xlabel(
+                f"Difference between TRGT AL and AL estimated using {args.tech.upper()} reads (bp)"
+            )
+        if ax_j == 0:
+            axarr1[ax_i, ax_j].set_ylabel("Fraction of reads at a locus\n(+/- 95% bootstrap CI)")
+        axarr1[ax_i, ax_j].set_title(
+            f"Reads supporting the {col_val} allele at {row_val} loci\n(at least 50% of reads match exp. AL at {frac_pass_loci}% of loci)"
         )
-        sns.despine(ax=axarr[ax_i, ax_j], top=True, right=True)
-    f.tight_layout()
-    f.savefig(args.out, dpi=200)
+        axarr1[ax_i, ax_j].set_title(
+            f"Reads supporting the {col_val} allele at\n{row_val} candidate de novo STRs"
+        )
+        axarr1[ax_i, ax_j].legend(title="Motif type", frameon=False)
+        sns.despine(ax=axarr1[ax_i, ax_j], top=True, right=True)
+    f1.tight_layout()
+    f1.savefig(args.out, dpi=300)
+    new_fh = ".".join(args.out.split(".")[:-1])
+    f2.tight_layout()
+    f2.savefig(new_fh + ".alt.png", dpi=300)
 
 
 if __name__ == "__main__":
@@ -193,6 +279,12 @@ if __name__ == "__main__":
         type=int,
         default=1,
         help="""Number of threads to use for bootstrap estimation.""",
+    )
+    p.add_argument(
+        "-n_bootstraps",
+        type=int,
+        default=1_000,
+        help="""Number of bootstraps to use for bootstrap estimation.""",
     )
     args = p.parse_args()
     main(args)
