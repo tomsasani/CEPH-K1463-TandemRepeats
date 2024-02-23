@@ -3,6 +3,7 @@ from typing import Tuple, Union
 
 import pysam
 
+
 def bp_overlap(s1: int, e1: int, s2: int, e2: int):
     return max(
         max((e2 - s1), 0) - max((e2 - e1), 0) - max((s2 - s1), 0),
@@ -107,7 +108,16 @@ def get_read_diff(
 
     return diff
 
-def extract_diffs_from_bam(bam: pysam.AlignmentFile, chrom: str, start: int, end: int, ref_al_diff: int, alt_al_diff: int):
+
+def extract_diffs_from_bam(
+    bam: pysam.AlignmentFile,
+    chrom: str,
+    start: int,
+    end: int,
+    ref_al_diff: int,
+    alt_al_diff: int,
+    min_mapq: int = 60,
+):
     diffs = []
 
     if bam is None:
@@ -119,6 +129,7 @@ def extract_diffs_from_bam(bam: pysam.AlignmentFile, chrom: str, start: int, end
                 start,
                 end,
                 slop=max([abs(ref_al_diff), abs(alt_al_diff)]),
+                min_mapq=min_mapq,
             )
             if diff is None:
                 continue
