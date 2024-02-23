@@ -92,6 +92,9 @@ def main(args):
     else:
         res_df["Is transmitted?"] = "unknown"
 
+    # remove complex STRs
+    res_df = res_df[~res_df["child_motif_counts"].str.contains("_")]
+
     res_df["exp_diff"] = res_df["exp_allele_diff_ref"] - res_df["exp_allele_diff_alt"]
     res_df = res_df.query("exp_diff != 0")
 
@@ -122,13 +125,16 @@ def main(args):
     # require at least 10 total spanning reads
     kid_df = kid_df[kid_df["Total read support"] >= 10]
 
+    kid_df["Read support frac"] = kid_df["Read support"] / kid_df["Total read support"]
+
     val_col = "measured_allele_length_error"
 
     if args.tech == "ont":
         kid_df = kid_df[(kid_df[val_col] >= -100) & (kid_df[val_col] <= 100)]
 
     row_col, col_col, group_col = "Is transmitted?", "is_ref", "Motif type"
-
+    row_col = "is_ref"
+    
     row_vals, col_vals = kid_df[row_col].unique(), kid_df[col_col].unique()
     row2idx, col2idx = dict(zip(row_vals, range(len(row_vals)))), dict(
         zip(col_vals, range(len(col_vals))),
@@ -138,7 +144,7 @@ def main(args):
         len(row_vals),
         len(col_vals),
         sharex=True,
-        sharey=True,
+        #sharey=True,
         figsize=(12, 7),
     )
 
@@ -181,7 +187,11 @@ def main(args):
         bootstrap_fracs = bootstrap(arr_fracs, n=args.n_bootstraps)
 
         # measure fraction of loci at which X% of reads perfectly support the allele
-        n_pass_loci = np.sum(arr_fracs[:, 0 - emin - 1] >= 0.5)
+        n_pass_loci = 0
+        # the number of loci that pass is equal to the number of loci at which
+        # 50% or more of reads perfectly match the expected allele size
+        perfect_match_idx = 0 - emin - 1
+        n_pass_loci = np.sum(arr_fracs[:, perfect_match_idx] >= 0.5)
         frac_pass_loci = round(100 * n_pass_loci / arr_fracs.shape[0], 1)
 
         xvals = np.arange(0, 1.01, 0.01)

@@ -36,21 +36,14 @@ def main(args):
         ).sample(1_000)
         InheritedSchema.validate(mutations)
     elif args.variant_type == "dnm":
-        mutations = pd.read_parquet(args.mutations)
-        DeNovoSchema.validate(mutations)
+        mutations = pd.read_csv(args.mutations, sep="\t")
+        #DeNovoSchema.validate(mutations)
         # if we're looking at de novos, ensure that we filter
         # the DataFrame to exclude the non-denovo candidates
-        mutations = mutations[mutations["denovo_status"].str.contains("Y")]
+        mutations = mutations[mutations["denovo_coverage"] >= 1]
 
-    # filter to the samples of interest
-    mutations = mutations[mutations["sample_id"].astype(str) == args.sample_id]
-
-    # remove sex chromosomes, and add chromosome column if not already provided
-    if "chrom" in mutations.columns:
-        mutations = mutations[mutations["chrom"] != "chrX"]
-    else:
-        mutations["chrom"] = mutations["trid"].apply(lambda t: t.split("_")[0])
-        mutations = mutations[mutations["chrom"] != "chrX"]
+    # remove sex chromosomes
+    mutations = mutations[~mutations["trid"].str.contains("X|Y|Un|random", regex=True)]
 
     # read in the VCF file
     vcf = VCF(args.vcf, gts012=True)
@@ -77,6 +70,9 @@ def main(args):
 
         region = f"{chrom}:{start}-{end}"
 
+        #if region != "chr21:8405572-8405658": continue
+        #print (row)
+
         # loop over VCF, allowing for slop to ensure we hit the STR
         for var in vcf(region):
             # ensure the VCF TRID matches the TR TRID
@@ -88,53 +84,54 @@ def main(args):
             alleles.extend(var.ALT)
 
             # figure out the motif(s) that's repeated in the STR
-            tr_motif = var.INFO.get("MOTIFS").split(",")
+            tr_motif = var.INFO.get("MOTIFS")#.split(",")
 
             # loop over motifs
-            for motif_i, motif in enumerate(tr_motif):
-                # the difference between the AL fields at this locus represents the
-                # expected expansion size of the STR.
-                ref_al, alt_al = var.format("AL")[0]
+            #for motif_i, motif in enumerate(tr_motif):
+            # the difference between the AL fields at this locus represents the
+            # expected expansion size of the STR.
+            ref_al, alt_al = var.format("AL")[0]
 
-                # if the total length of the allele is greater than the length of
-                # a typical read, move on
-                if alt_al > args.max_al:
-                    continue
+            # if the total length of the allele is greater than the length of
+            # a typical read, move on
+            if alt_al > int(args.max_al):
+                continue
 
-                # calculate expected diffs between alleles and the refernece genome
-                exp_diff_alt = alt_al - len(var.REF)
-                exp_diff_ref = ref_al - len(var.REF)
+            # calculate expected diffs between alleles and the refernece genome
+            exp_diff_alt = alt_al - len(var.REF)
+            exp_diff_ref = ref_al - len(var.REF)
 
-                # loop over reads in the BAM for this individual
-                # loop over reads in the BAMs
-                for bam, label in zip(
-                    (mom_bam, dad_bam, kid_bam),
-                    ("mom", "dad", "kid"),
-                ):
-                    diff_counts = extract_diffs_from_bam(
-                        bam,
-                        chrom,
-                        start,
-                        end,
-                        exp_diff_ref,
-                        exp_diff_alt,
-                    )
+            # loop over reads in the BAM for this individual
+            # loop over reads in the BAMs
+            for bam, label in zip(
+                (mom_bam, dad_bam, kid_bam),
+                ("mom", "dad", "kid"),
+            ):
+                
+                diff_counts = extract_diffs_from_bam(
+                    bam,
+                    chrom,
+                    start,
+                    end,
+                    exp_diff_ref,
+                    exp_diff_alt,
+                    min_mapq=20,
+                )
+                #print (label, diff_counts)
+                row_dict = row.to_dict()
 
-                    for diff, count in diff_counts:
-                        d = {
-                            "region": region,
-                            "sample": label,
-                            "motif": motif,
-                            "motif_number": motif_i + 1,
-                            "diff": diff,
-                            "Read support": count,
-                            "exp_allele_diff_alt": exp_diff_alt,
-                            "exp_allele_diff_ref": exp_diff_ref,
-                            "n_with_denovo_allele_strict": row[
-                                "n_with_denovo_allele_strict"
-                            ],
-                        }
-                        res.append(d)
+                for diff, count in diff_counts:
+                    row_dict = row.to_dict()
+                    row_dict.update({
+                        "region": region,
+                        "sample": label,
+                        "motif": tr_motif,
+                        "diff": diff,
+                        "Read support": count,
+                        "exp_allele_diff_alt": exp_diff_alt,
+                        "exp_allele_diff_ref": exp_diff_ref,
+                    })
+                    res.append(row_dict)
 
     print(
         "TOTAL sites: ",
