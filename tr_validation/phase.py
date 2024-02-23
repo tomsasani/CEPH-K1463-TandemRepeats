@@ -11,6 +11,7 @@ from schema import DeNovoSchema
 import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np 
+from build_roc_curve_dnms import get_dp
 
 
 def make_tree(fh: str):
@@ -53,39 +54,39 @@ def in_phase_block(row: pd.Series, phase_tree):
 def main():
     KID_STR_VCF = VCF("tr_validation/data/hiphase/2189_SF_GRCh38_50bp_merge.sorted.phased.vcf.gz", gts012=True)
 
-    KID_DNMS = "tr_validation/data/df_transmission_C0_T0.parquet.gzip"
     DNM_PREF = "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/TRGT/from_aws/GRCh38_v1.0_50bp_merge/493ef25/trgt-denovo/"
     KID_DNMS = f"{DNM_PREF}/2189_SF_GRCh38_50bp_merge_trgtdn.csv.gz"
 
     KID_PHASE_BLOCKS = "tr_validation/data/hiphase/NA12886.GRCh38.hiphase.blocks.tsv"
 
     CHROMS = [f"chr{c}" for c in range(1, 23)]
-    #CHROMS = ["chr1"]
 
-    informative_sites = pd.read_csv("inf_sites.csv")
+    informative_sites = pd.read_csv("inf_sites.csv", dtype={"haplotype_A_parent": str, "haplotype_B_parent": str})
 
     mutations = pd.read_csv(KID_DNMS, sep="\t")
 
-    # if we're looking at de novos, ensure that we filter
-    # the DataFrame to exclude the non-denovo candidates
-    mutations = mutations[mutations["denovo_status"].isin(["Y:+", "Y:-"])]
-    print (mutations.shape[0])
-    mutations = mutations[(mutations["child_coverage"] >= 10)]# & (mutations["child_ratio"] >= 0.2) & (mutations["child_ratio"] <= 0.8)]
-    mutations = mutations[(mutations["father_dropout"] == "N") & (mutations["mother_dropout"] == "N")]
-    f, ax = plt.subplots()
-    ax.hist(mutations["allele_ratio"])
-    f.savefig("ratio.png")
+    mutations = mutations[mutations["denovo_coverage"] >= 1]
+    # only look at autosomes
+    mutations = mutations[~mutations["trid"].str.contains("X|Y|Un|random", regex=True)]
+    mutations = mutations[~mutations["child_motif_counts"].str.contains("_")]
+
+    #mutations = mutations[(mutations["child_dropout"] == "N") & (mutations["mother_dropout"] == "N") & (mutations["father_dropout"] == "N")]
+
+    mutations["mom_coverage"] = mutations["per_allele_reads_mother"].apply(
+        lambda a: get_dp(a)
+    )
+    mutations["dad_coverage"] = mutations["per_allele_reads_father"].apply(
+        lambda a: get_dp(a)
+    )
+
     phase_tree = make_tree(KID_PHASE_BLOCKS)
 
-    # filter to STRs in phase blocks. seems to remove around 100 / 2500 DNMs.
     print (f"Total of {mutations.shape[0]} DNMs")
     mutations["phase_block"] = mutations.apply(lambda row: in_phase_block(row, phase_tree), axis=1)
     mutations = mutations[mutations["phase_block"] != "UNK"]
 
-    n_dnms_in_phase_blocks = mutations["trid"].nunique()
+    n_dnms_in_phase_blocks = mutations[mutations["phase_block"] != "UNK"]["trid"].nunique()
     print (f"Total of {n_dnms_in_phase_blocks} DNMs within phase blocks.")
-
-    print (mutations.columns)
 
     dnm_phases = []
 
@@ -109,11 +110,9 @@ def main():
 
         # figure out genotype that is the de novo
         denovo_gt = row["genotype"]
-        #denovo_idx = row["index"]
         phase_block = row["phase_block"]
         phase_chrom = phase_block.split(":")[0]
         phase_start, phase_end = list(map(int, phase_block.split(":")[1].split("-")))
-        
 
         # loop over VCF, allowing for slop to ensure we hit the STR
         for var in KID_STR_VCF(region):
@@ -129,17 +128,16 @@ def main():
                 NOT_PHASED += 1
                 continue
 
-            #print (hap_a, hap_b)
-            #denovo_gt = hap_a if denovo_idx == 0 else hap_b 
             # figure out haplotype ID on which DNM resides
             if hap_a == denovo_gt:
                 denovo_hap_id = "A"
             elif hap_b == denovo_gt:
                 denovo_hap_id = "B"
             else:
-                print (denovo_gt, hap_a, hap_b, is_phased)# += 1
                 continue
-            dnm_phases.append(
+
+            row_dict = row.to_dict()
+            row_dict.update(
                 {
                     "trid": trid,
                     "denovo_hap_id": denovo_hap_id,
@@ -148,8 +146,7 @@ def main():
                     "end": phase_end,
                 }
             )
-
-        
+            dnm_phases.append(row_dict)
 
     dnm_phases = pd.DataFrame(dnm_phases)
 
@@ -157,15 +154,44 @@ def main():
     print (f"Total of {n_phased_denovos} phased DNMs")
     print (f"{WRONG_TRID} with non-matching TRIDs, {NOT_PHASED} that weren't phased, {NON_AUTOSOMAL} not on autosomes.")
 
-    merged = dnm_phases.merge(informative_sites, on=["chrom", "start", "end"])
+    merged_dnms_inf = dnm_phases.merge(informative_sites, on=["chrom", "start", "end"], how="left")
+
+    merged_dnms_inf["phase"] = merged_dnms_inf.apply(lambda row: row["haplotype_{}_parent".format(row["denovo_hap_id"])], axis=1)
+    print (merged_dnms_inf.groupby("phase").size())
+
+    merged_dnms_inf.drop_duplicates(["trid"]).drop(
+        columns=[
+            "chrom",
+            "start",
+            "end",
+            "haplotype_A_parent",
+            "haplotype_B_parent",
+            "phase_block",
+            "pos",
+            "alt_parent",
+            "ref_parent",
+            "gt",
+            "haplotype_A_allele",
+            "haplotype_B_allele",
+            "denovo_hap_id",
+        ]
+    ).fillna({"phase": "NA"}).to_csv("phased.csv", index=False)
+
+    print (merged_dnms_inf.dtypes)
+
+
 
     # add midpoint of STR to dataframe
-    merged["str_midpoint"] = merged["trid"].apply(lambda t: np.mean(list(map(int, t.split("_")[1:-1]))))
+    merged_dnms_inf["str_midpoint"] = merged_dnms_inf["trid"].apply(lambda t: np.mean(list(map(int, t.split("_")[1:-1]))))
 
-    N_INF = 5
+    ###
+    # require informative sites on either side?
+    ###
+
+    N_INF = 10
 
     res = []
-    for trid, trid_df in merged.groupby("trid"):
+    for trid, trid_df in merged_dnms_inf.groupby("trid"):
         # sort by informative site
         trid_df = trid_df.sort_values("pos")
         trid_df["diff_to_str"] = trid_df["pos"] - trid_df["str_midpoint"]
@@ -179,22 +205,84 @@ def main():
         nearest_dn = downstream_sites.head(N_INF)
         res.append(pd.concat([nearest_up, nearest_dn]))
         #break
-    merged_filtered = pd.concat(res)
+    merged_dnms_inf = pd.concat(res)
 
-    n_phased_denovos = merged["trid"].nunique()
+    merged = merged_dnms_inf.groupby(["trid", "phase"]).size().reset_index().rename(columns={0: "count"})
+    merged_totals = merged.groupby("trid").agg({"count": "sum"}).reset_index().rename(columns={"count": "total"})
+    merged = merged.merge(merged_totals, on="trid")
+    merged["frac"] = merged["count"] / merged["total"]
+    merged = merged.sort_values(["trid", "frac"], ascending=False).drop_duplicates(["trid"], keep="first")
+
+    # filter on number of INF sites that support
+    merged = merged[merged["frac"] == 1.]
+    # merged = merged.drop_duplicates(["trid"])
+    # at each informative site, examine the phase of the de novo allele with the parental alleles.
+    print (merged.groupby("phase").size())
+
+    # at various filtering values, what is the ratio of paternal to maternal mutations?
+    # coverage_thresh = np.arange(0, 30, 5)
+    # denovo_thresh = np.arange(0, 10, 1)
+    # res = []
+    # for cov in coverage_thresh:
+    #     for den in denovo_thresh:
+    #         mutations_filt = merged_dnms_inf[(merged_dnms_inf["child_coverage"] >= cov) & (merged_dnms_inf["mom_coverage"] >= cov) & (merged_dnms_inf["dad_coverage"] >= cov)]
+    #         mutations_filt = mutations_filt[mutations_filt["denovo_coverage"] >= den]
+
+    #         mutations_filt["is_paternal"] = mutations_filt["phase"] == 2209
+    #         #phased_counts = mutations_filt.groupby("phase").size().reset_index().rename(columns={0: "count"})
+    #         #if phased_counts.shape[0] == 0: continue
+            
+    #         #phased_counts["fraction"] = phased_counts["count"] / mutations_filt.shape[0]
+    #         #if "2209" not in phased_counts["phase"].to_list():
+    #         #     paternal = 0.
+    #         # else:
+    #         #     paternal = phased_counts[phased_counts["phase"] == "2209"]["fraction"].values[0]
+    #         phased_counts = mutations_filt[["is_paternal"]]
+    #         phased_counts["cov"] = cov
+    #         phased_counts["den"] = den
+    #         res.append(phased_counts)
+    #         # res.append({"paternal_frac": paternal, "Min. DP across trio": cov, "Min. DN coverage in child": den})
+    # res_df = pd.concat(res)
+
+    # print (res_df)
+
+    # f, ax = plt.subplots()
+    # sns.pointplot(x="den", y="is_paternal")
+    # sns.scatterplot(data=res_df.query("paternal_frac > 0"), x="Min. DN coverage in child", y="paternal_frac", hue="Min. DP across trio", ax=ax)
+    # ax.set_ylabel("Fraction of putative DNMs\nphased to paternal haplotype")
+    # sns.despine(ax=ax, top=True, right=True)
+    # f.tight_layout()
+    # f.savefig("scatterphase.png", dpi=200)
+    #mutations = mutations[mutations["allele_ratio"] >= 0.5]
+
+    f, ax = plt.subplots()
+    sns.histplot(
+        data=merged,
+        x="frac",
+        hue="phase",
+        stat="proportion",
+        #cumulative=True,
+        element="step",
+        fill=False,
+        ax=ax,
+    )
+    ax.set_xlabel("Fraction of informative sites\nthat support phase assignment")
+    ax.set_ylabel("Fraction of DNMs")
+    sns.despine(ax=ax, top=True, right=True)
+    f.tight_layout()
+    f.savefig('phase.png', dpi=200)
+
+    n_phased_denovos = merged_dnms_inf["trid"].nunique()
     print (f"Total of {n_phased_denovos} confidently phased DNMs")
 
-    trids = merged["trid"].unique()
+    trids = merged_dnms_inf["trid"].unique()
     focal_trid = trids[np.random.randint(len(trids))]
 
-    merged_focal = merged[merged["trid"] == focal_trid]
+    merged_focal = merged_dnms_inf[merged_dnms_inf["trid"] == focal_trid]
 
-    merged_focal["phase"] = merged_focal.apply(lambda row: row["haplotype_{}_parent".format(row["denovo_hap_id"])], axis=1)
-    #print (merged_focal)
-    
     xvals = merged_focal["pos"].values
-    y1 = merged_focal["haplotype_A_parent"] == 2209
-    y2 = merged_focal["haplotype_B_parent"] == 2209
+    y1 = merged_focal["haplotype_A_parent"] == "2209"
+    y2 = merged_focal["haplotype_B_parent"] == "2209"
 
     chrom, start, end, _ = focal_trid.split("_")
     focal_hap_id = merged_focal["denovo_hap_id"].unique()[0]
@@ -222,41 +310,6 @@ def main():
     f.tight_layout()
     f.savefig('phase_assignment.png', dpi=200)
 
-    merged_filtered["phase"] = merged_filtered.apply(lambda row: row["haplotype_{}_parent".format(row["denovo_hap_id"])], axis=1)
-
-    # merge with original mutation file to see how well the `allele_origin` column corroborates
-    # merged_orig = merged.merge(mutations, on="trid")
-
-    # merged_orig["matches"] = merged_orig.apply(lambda row: row["allele_origin"].split(":")[0] == row["phase"], axis=1)
-    # print (merged_orig.drop_duplicates("trid")[["allele_origin", "phase"]])
-    # print (merged_orig.drop_duplicates("trid").groupby("matches").size())
-
-
-    merged_filtered = merged_filtered.groupby(["trid", "phase"]).size().reset_index().rename(columns={0: "count"})
-    merged_totals = merged_filtered.groupby("trid").agg({"count": "sum"}).reset_index().rename(columns={"count": "total"})
-    merged_filtered = merged_filtered.merge(merged_totals, on="trid")
-    merged_filtered["frac"] = merged_filtered["count"] / merged_filtered["total"]
-    merged_filtered = merged_filtered.sort_values(["trid", "frac"], ascending=False).drop_duplicates(["trid"], keep="first")
-    # merged = merged.drop_duplicates(["trid"])
-    # at each informative site, examine the phase of the de novo allele with the parental alleles.
-    print (merged_filtered.groupby("phase").size())
-
-    f, ax = plt.subplots()
-    sns.histplot(
-        data=merged_filtered,
-        x="frac",
-        hue="phase",
-        stat="proportion",
-        #cumulative=True,
-        element="step",
-        fill=False,
-        ax=ax,
-    )
-    ax.set_xlabel("Fraction of informative sites\nthat support phase assignment")
-    ax.set_ylabel("Fraction of DNMs")
-    sns.despine(ax=ax, top=True, right=True)
-    f.tight_layout()
-    f.savefig('phase.png', dpi=200)
 
 if __name__ == "__main__":
     main()
