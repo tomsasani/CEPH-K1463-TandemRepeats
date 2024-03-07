@@ -1,7 +1,41 @@
 from collections import Counter
 from typing import Tuple, Union
+import pandas as pd
 
 import pysam
+import numpy as np
+
+def filter_mutation_dataframe(
+    mutations: pd.DataFrame,
+    remove_complex: bool = True,
+    remove_duplicates: bool = True,
+    mc_column: str = "child_MC",
+    al_column: str = "child_AL",
+):
+
+    mutations = mutations[mutations["denovo_coverage"] >= 1]
+    # only look at autosomes
+    mutations = mutations[~mutations["trid"].str.contains("X|Y|Un|random", regex=True)]
+    # no parental dropout
+    mutations = mutations[(mutations["father_dropout"] == "N") & (mutations["mother_dropout"] == "N")]
+    # only expansions/contractions
+    mutations["expansion_size"] = mutations[al_column].apply(
+        lambda c: (
+            int(c.split(",")[1]) - int(c.split(",")[0])
+            if len(c.split(",")) > 1
+            else np.nan
+        )
+    )
+    mutations.dropna(subset=["expansion_size"], inplace=True)
+    mutations = mutations[mutations["expansion_size"] != 0]
+    if remove_complex:
+        mutations = mutations[~mutations[mc_column].str.contains("_")]
+    if remove_duplicates:
+        trid_counts = mutations.groupby("trid").size().to_dict()
+        duplicate_trids = [k for k,v in trid_counts.items() if v > 1]
+        mutations = mutations[~mutations["trid"].isin(duplicate_trids)]
+
+    return mutations
 
 
 def bp_overlap(s1: int, e1: int, s2: int, e2: int):
@@ -52,15 +86,29 @@ def count_indel_in_read(
     cigar_op_total = 0
     cur_pos = rs
     for op, bp in ct:
-        if op not in (MATCH, INS, DEL):
-            continue
         # figure out intersection between current cigar operation span
-        # and the variant locus span
-        op_s, op_e = cur_pos, cur_pos + bp
+        # and the variant locus span. if the operation is an INS, then
+        # the operation will start at s_0 and *technically* end at s_0 + INS_SIZE,
+        # but relative to the reference genome is an operation that starts at
+        # s_0 and ends at s_0 + 1. 
+        if op == INS:
+            op_length = 1
+        elif op in (MATCH, DEL):
+            op_length = bp
+        else: continue
+
+        op_s, op_e = cur_pos, cur_pos + op_length
+        #print (op, bp, op_s, op_e, vs, ve, slop, var_s, var_e)
         overlapping_bp = bp_overlap(op_s, op_e, var_s, var_e)
+        #print (overlapping_bp)
         # increment cigar ops by the total base pairs of this op
-        cigar_op_total += overlapping_bp * OP2DIFF[op]
-        cur_pos += bp
+        if op == INS:
+            cigar_op_total += bp * OP2DIFF[op]
+        elif op in (MATCH, DEL):
+            cigar_op_total += overlapping_bp * OP2DIFF[op]
+        # increment our current position counter 
+        cur_pos += op_length
+    #print (cigar_op_total)
     return cigar_op_total
 
 
@@ -103,9 +151,10 @@ def get_read_diff(
 
     # query the CIGAR string in the read.
     ct = read.cigartuples
+    #print (ct)
 
     diff = count_indel_in_read(ct, qs, start, end, slop=slop)
-
+    #print ("TOTAL DIFF", diff)
     return diff
 
 
@@ -117,8 +166,19 @@ def extract_diffs_from_bam(
     ref_al_diff: int,
     alt_al_diff: int,
     min_mapq: int = 60,
+    is_expansion: bool = False,
 ):
     diffs = []
+
+    # if we're dealing with an expansion, we expect CIGAR
+    # operations to be insertions relative to the reference.
+    # thus, we can get away with requiring less slop, as the 
+    # read only needs to map across the full length of the reference
+    # allele.
+    slop = max([abs(ref_al_diff), abs(alt_al_diff)])
+    if is_expansion:
+        slop = 1
+
 
     if bam is None:
         diffs.append(0)
@@ -128,9 +188,10 @@ def extract_diffs_from_bam(
                 read,
                 start,
                 end,
-                slop=max([abs(ref_al_diff), abs(alt_al_diff)]),
+                slop=slop,
                 min_mapq=min_mapq,
             )
+
             if diff is None:
                 continue
             else:

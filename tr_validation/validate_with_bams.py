@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import tqdm
 import argparse
 from collections import Counter
+import numpy as np
 
 from utils import extract_diffs_from_bam
 from schema import DeNovoSchema, InheritedSchema
@@ -69,9 +70,7 @@ def main(args):
             continue
 
         region = f"{chrom}:{start}-{end}"
-
-        #if region != "chr21:8405572-8405658": continue
-        #print (row)
+        denovo_gt = row["genotype"]
 
         # loop over VCF, allowing for slop to ensure we hit the STR
         for var in vcf(region):
@@ -84,22 +83,42 @@ def main(args):
             alleles.extend(var.ALT)
 
             # figure out the motif(s) that's repeated in the STR
-            tr_motif = var.INFO.get("MOTIFS")#.split(",")
+            tr_motif = var.INFO.get("MOTIFS")
 
-            # loop over motifs
-            #for motif_i, motif in enumerate(tr_motif):
             # the difference between the AL fields at this locus represents the
             # expected expansion size of the STR.
-            ref_al, alt_al = var.format("AL")[0]
+            allele_lengths = var.format("AL")[0]
+            allele_lengths = [len(al) for al in alleles]
+
+            #if region != "chr1:171246527-171246564": continue
+
+            # figure out which AL corresponds to the de novo genotype in the child.
+            # to do this, we can simply calculate the lengths of the various alleles in the
+            # union of the REF and ALTs. then, just index the ALs based on the genotype ID associated
+            # with the denovo allele.
+            denovo_al = allele_lengths[denovo_gt]
+            # to figure out which AL corresponds to the "non denovo" AL, we have to figure
+            # out what the non-denovo genotype ID is.
+
+            genotypes = np.array(var.genotypes[0][:-1])
+            non_denovo_gt_idx = np.where(genotypes != denovo_gt)[0]
+            if non_denovo_gt_idx.shape[0] == 0: continue
+            non_denovo_gt_idx = non_denovo_gt_idx[0]
+            non_denovo_gt = genotypes[non_denovo_gt_idx]
+            non_denovo_al = allele_lengths[non_denovo_gt]
 
             # if the total length of the allele is greater than the length of
             # a typical read, move on
-            if alt_al > int(args.max_al):
+            if (max([denovo_al, non_denovo_al]) * 2) > int(args.max_al):
                 continue
 
-            # calculate expected diffs between alleles and the refernece genome
-            exp_diff_alt = alt_al - len(var.REF)
-            exp_diff_ref = ref_al - len(var.REF)
+            
+            # calculate expected diffs between alleles and the refernece genome.
+            exp_diff_denovo = denovo_al - len(var.REF)
+            exp_diff_non_denovo = non_denovo_al - len(var.REF)
+
+            # different slop for ins vs del so we capture alleels
+            is_expansion = denovo_al > non_denovo_al
 
             # loop over reads in the BAM for this individual
             # loop over reads in the BAMs
@@ -113,10 +132,12 @@ def main(args):
                     chrom,
                     start,
                     end,
-                    exp_diff_ref,
-                    exp_diff_alt,
-                    min_mapq=20,
+                    exp_diff_denovo,
+                    exp_diff_non_denovo,
+                    min_mapq=1,
+                    is_expansion=is_expansion,
                 )
+
                 #print (label, diff_counts)
                 row_dict = row.to_dict()
 
@@ -128,8 +149,8 @@ def main(args):
                         "motif": tr_motif,
                         "diff": diff,
                         "Read support": count,
-                        "exp_allele_diff_alt": exp_diff_alt,
-                        "exp_allele_diff_ref": exp_diff_ref,
+                        "exp_allele_diff_denovo": exp_diff_denovo,
+                        "exp_allele_diff_non_denovo": exp_diff_non_denovo,
                     })
                     res.append(row_dict)
 
@@ -141,7 +162,8 @@ def main(args):
     for reason, count in Counter(SKIPPED).most_common():
         print(f"{reason}: {count}")
     res_df = pd.DataFrame(res)
-    res_df.to_csv(args.out, index=False)
+    
+    res_df[res_df["sample"] == "kid"].to_csv(args.out, index=False)
 
 
 if __name__ == "__main__":

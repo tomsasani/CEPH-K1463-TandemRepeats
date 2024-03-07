@@ -5,7 +5,8 @@ import argparse
 import numpy as np
 from typing import Callable
 import numba
-
+from utils import filter_mutation_dataframe
+from assess_concordance import assign_allele
 plt.rc("font", size=10)
 
 
@@ -38,6 +39,7 @@ def compute_nanmean(a: np.ndarray, row: bool = True) -> np.ndarray:
 def bootstrap(X: np.ndarray, n: int = 100):
     bootstrapped = np.zeros((n, X.shape[0], X.shape[1]))
 
+
     i = X.shape[0]
     for boot_i in numba.prange(n):
         idxs = np.random.randint(0, i, size=i)
@@ -60,25 +62,6 @@ def classify_motif(motif: str):
         return "non-homopolymer"
 
 
-def calculate_min_dist(row: pd.Series):
-    # figure out whether the observed diff is closer
-    # to the expected ALT or REF allele size
-    alt_distance = row["diff"] - row["exp_allele_diff_alt"]
-    ref_distance = row["diff"] - row["exp_allele_diff_ref"]
-
-    # if the diff is closer to the REF allele length, we'll assume
-    # that it is a REF observation. and vice versa
-    if abs(ref_distance) < abs(alt_distance):
-        is_ref = True
-    elif abs(ref_distance) > abs(alt_distance):
-        is_ref = False
-    # if they're equal, we'll randomly assign the diff to be a REF/ALT obs
-    else:
-        is_ref = np.random.uniform() > 0.5
-
-    return "REF" if is_ref else "ALT"
-
-
 def main(args):
     numba.set_num_threads(args.threads)
 
@@ -92,21 +75,17 @@ def main(args):
     else:
         res_df["Is transmitted?"] = "unknown"
 
-    # remove complex STRs
-    res_df = res_df[~res_df["child_motif_counts"].str.contains("_")]
-
-    res_df["exp_diff"] = res_df["exp_allele_diff_ref"] - res_df["exp_allele_diff_alt"]
-    res_df = res_df.query("exp_diff != 0")
+    res_df = filter_mutation_dataframe(res_df, remove_complex=True, remove_duplicates=False)
 
     res_df["Motif type"] = res_df["motif"].apply(lambda m: classify_motif(m))
+    res_df["allele_assignment"] = res_df.apply(lambda row: assign_allele(row, "exp_allele_diff_denovo"), axis=1)
 
     # for each read, calculate the minimum distance to either the REF or ALT allele
     # (i.e., the "closest" allele)
-    res_df["is_ref"] = res_df.apply(lambda row: calculate_min_dist(row), axis=1)
     res_df["Expected allele length"] = res_df.apply(
-        lambda row: row["exp_allele_diff_ref"]
-        if row["is_ref"] == "REF"
-        else row["exp_allele_diff_alt"],
+        lambda row: row["exp_allele_diff_non_denovo"]
+        if row["allele_assignment"] == "non_denovo"
+        else row["exp_allele_diff_denovo"],
         axis=1,
     )
     res_df["measured_allele_length_error"] = (
@@ -132,8 +111,11 @@ def main(args):
     if args.tech == "ont":
         kid_df = kid_df[(kid_df[val_col] >= -100) & (kid_df[val_col] <= 100)]
 
-    row_col, col_col, group_col = "Is transmitted?", "is_ref", "Motif type"
-    row_col = "is_ref"
+    row_col, col_col, group_col = "Is transmitted?", "allele_assignment", "Motif type"
+    row_col = "allele_assignment"
+
+    print (kid_df[["trid", "diff", "allele_assignment", "exp_allele_diff_denovo"]])
+    print (kid_df.query("diff == exp_allele_diff_denovo")[["trid", "diff", "allele_assignment", "exp_allele_diff_denovo", "exp_allele_diff_non_denovo"]])
     
     row_vals, col_vals = kid_df[row_col].unique(), kid_df[col_col].unique()
     row2idx, col2idx = dict(zip(row_vals, range(len(row_vals)))), dict(
