@@ -11,154 +11,218 @@ from schema import DeNovoSchema
 import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
+import argparse
 
+# def catalog_informative_sites(
+#     vcf: VCF,
+#     region: str,
+#     parent_dict: Dict,
+# ):
+#     res = []
+#     for v in vcf(region):
+#         if not var_pass(v): continue
+#         if f"{v.CHROM}:{v.POS}" not in parent_dict: continue
+
+#         gts = v.genotypes
+#         hap_0, hap_1, is_phased = gts[0]
+#         if not is_phased: continue
+#         if hap_0 + hap_1 != 1: continue
+
+#         (
+#             dad_hap_0,
+#             dad_hap_1,
+#             dad_phased,
+#             mom_hap_0,
+#             mom_hap_1,
+#             mom_phased,
+#         ) = parent_dict[f"{v.CHROM}:{v.POS}"].values()
+
+#         dad_gt, mom_gt = dad_hap_0 + dad_hap_1, mom_hap_0 + mom_hap_1
+
+#         if dad_gt == mom_gt: continue
+
+#         # figure out origin of haplotype A and B
+#         hap_0_origin, hap_1_origin = None, None
+#         if dad_gt > mom_gt:
+#             hap_0_origin = "dad" if hap_0 == 1 else "mom"
+#             hap_1_origin = "dad" if hap_1 == 1 else "mom"
+#         elif mom_gt > dad_gt:
+#             hap_0_origin = "mom" if hap_0 == 1 else "dad"
+#             hap_1_origin = "mom" if hap_1 == 1 else "dad"
+
+#         dad_haplotype_origin, mom_haplotype_origin = "?", "?"
+#         if dad_gt > mom_gt and dad_phased:
+#             dad_haplotype_origin = "A" if dad_hap_0 == 1 else "B"
+#         elif mom_gt > dad_gt and mom_phased:
+#             mom_haplotype_origin = "A" if mom_hap_0 == 1 else "B"
+#         elif dad_gt < mom_gt and dad_phased:
+#             dad_haplotype_origin = "A" if dad_hap_0 == 0 else "B"
+#         elif mom_gt < dad_gt and mom_phased:
+#             mom_haplotype_origin = "A" if mom_hap_0 == 0 else "B"
+
+#         out_dict = {
+#             "chrom": v.CHROM,
+#             "pos": v.POS,
+#             "dad_gt": "|".join((str(dad_hap_0), str(dad_hap_1))) if dad_phased else "/".join((str(dad_hap_0), str(dad_hap_1))),
+#             "mom_gt": "|".join((str(mom_hap_0), str(mom_hap_1))) if mom_phased else "/".join((str(mom_hap_0), str(mom_hap_1))),
+#             "kid_gt": "|".join((str(hap_0), str(hap_1))),
+#             "haplotype_A_origin": hap_0_origin,
+#             "haplotype_B_origin": hap_1_origin,
+#             "dad_haplotype_origin": dad_haplotype_origin,
+#             "mom_haplotype_origin": mom_haplotype_origin,
+#         }
+#         #print (out_dict)
+#         #break
+
+#         res.append(out_dict)
+
+#     return pd.DataFrame(res)
+
+def var_pass(v: cyvcf2.Variant, idxs: np.ndarray):
+
+    GT2ALT_AB = {0: (0., 0.05), 1: (0.2, 0.8), 2: (0.95, 1.)}
+
+    if v.var_type != "snp": return False
+    if v.call_rate < 1.: return False
+    if np.any(v.gt_quals[idxs] < 20): return False
+    if len(v.ALT) > 1: return False
+    rd, ad = v.gt_ref_depths, v.gt_alt_depths
+    td = ad + rd
+    ab = ad / td
+    if np.any(td[idxs] < 10): return False
+
+    gts = v.gt_types
+    for idx in idxs:
+        min_ab, max_ab = GT2ALT_AB[gts[idx]]
+        if ab[idx] < min_ab or ab[idx] > max_ab: 
+            return False
+
+    return True
 
 def catalog_informative_sites(
     vcf: VCF,
     region: str,
+    dad: str,
+    mom: str,
+    child: str,
+    smp2idx: Dict[str, int],
 ):
+
+    dad_idx, mom_idx = smp2idx[dad], smp2idx[mom]
+    kid_idx = smp2idx[child]
+
     res = []
     for v in vcf(region):
-        if v.var_type != "snp": continue
-        if v.gt_quals[0] < 20: continue
-        rd, ad = v.gt_ref_depths, v.gt_alt_depths
-        if rd[0] + ad[0] < 10: continue
+        if not var_pass(
+            v,
+            np.array([dad_idx, mom_idx, kid_idx]),
+        ):
+            continue
 
         gts = v.genotypes
-        hap_0, hap_1, is_phased = gts[0]
-        if not is_phased: continue
-        if hap_0 + hap_1 != 1: continue
+
+        dad_hap_0, dad_hap_1, dad_phased = gts[dad_idx]
+        mom_hap_0, mom_hap_1, mom_phased = gts[mom_idx]
+        kid_hap_0, kid_hap_1, kid_phased = gts[kid_idx]
+
+        dad_gt, mom_gt = (
+            dad_hap_0 + dad_hap_1,
+            mom_hap_0 + mom_hap_1,
+        )
+
+        if dad_gt == mom_gt: continue
+
+        if not kid_phased: continue
+        if kid_hap_0 + kid_hap_1 != 1: continue
+
+        if not dad_phased: 
+            if dad_hap_0 != dad_hap_1: continue
+        if not mom_phased: 
+            if mom_hap_0 != mom_hap_1: continue
+
+        hap_0_origin, hap_1_origin = None, None
+        if dad_gt > mom_gt:
+            hap_0_origin = "dad" if kid_hap_0 == 1 else "mom"
+            hap_1_origin = "dad" if kid_hap_1 == 1 else "mom"
+        elif mom_gt > dad_gt:
+            hap_0_origin = "mom" if kid_hap_0 == 1 else "dad"
+            hap_1_origin = "mom" if kid_hap_1 == 1 else "dad"
+
+        dad_haplotype_origin, mom_haplotype_origin = "?", "?"
+        if dad_gt > mom_gt and dad_phased:
+            dad_haplotype_origin = "A" if dad_hap_0 == 1 else "B"
+        elif mom_gt > dad_gt and mom_phased:
+            mom_haplotype_origin = "A" if mom_hap_0 == 1 else "B"
+        elif dad_gt < mom_gt and dad_phased:
+            dad_haplotype_origin = "A" if dad_hap_0 == 0 else "B"
+        elif mom_gt < dad_gt and mom_phased:
+            mom_haplotype_origin = "A" if mom_hap_0 == 0 else "B"
 
         out_dict = {
             "chrom": v.CHROM,
             "pos": v.POS,
-            "gt": "|".join((str(hap_0), str(hap_1))),
-            "haplotype_A_allele": hap_0,
-            "haplotype_B_allele": hap_1,
+            "dad_gt": "|".join((str(dad_hap_0), str(dad_hap_1))) if dad_phased else "/".join((str(dad_hap_0), str(dad_hap_1))),
+            "mom_gt": "|".join((str(mom_hap_0), str(mom_hap_1))) if mom_phased else "/".join((str(mom_hap_0), str(mom_hap_1))),
+            "kid_gt": "|".join((str(kid_hap_0), str(kid_hap_1))),
+            "haplotype_A_origin": hap_0_origin,
+            "haplotype_B_origin": hap_1_origin,
+            "dad_haplotype_origin": dad_haplotype_origin,
+            "mom_haplotype_origin": mom_haplotype_origin,
         }
-
         res.append(out_dict)
 
     return pd.DataFrame(res)
 
-def catalog_informative_sites_parents(
-    vcf: VCF,
-    region: str,
-    parents: List[str],
-    smp2idx: Dict[str, int],
-):
-    
-    idxs = np.array([smp2idx[p] for p in parents])
-    res = []
-    for v in vcf(region):
-        if v.var_type != "snp": continue
-        if np.any(v.gt_quals[idxs] < 20): continue
-        rd, ad = v.gt_ref_depths, v.gt_alt_depths
-        td = ad + rd
-        if np.any(td[idxs] < 10): continue
+def main(args):
 
-        gts = v.gt_types[idxs]
-        if np.any(gts == 3): continue
-        if gts[0] == gts[1]: continue
+    SNP_VCF = VCF(args.phased_snp_vcf, gts012=True)
 
-        # we consider the informative parent to be the one
-        # that donated the ALT allele
-        if gts[0] > gts[1]:
-            inf_parent, oth_parent = parents
+    SMP2IDX = dict(zip(SNP_VCF.samples, range(len(SNP_VCF.samples))))
 
-        else:
-            inf_parent, oth_parent = parents[::-1]
+    CHROMS = [f"chr{c}" for c in range(1, 23)]
 
-        out_dict = {
-                "chrom": v.CHROM,
-                "pos": v.POS,
-                "alt_parent": inf_parent,
-                "ref_parent": oth_parent,
-            }
-    
-        res.append(out_dict)
+    informative_sites = []
 
-    return pd.DataFrame(res)
+    with open(args.phase_blocks, "r") as infh:
+        csvf = csv.reader(infh, delimiter="\t")
+        header = None
+        for i,l in tqdm.tqdm(enumerate(csvf)):
+            if header is None:
+                header = l
+                continue
+            d = dict(zip(header, l))
+            chrom, start, end = d["chrom"], d["start"], d["end"]
+            if chrom not in CHROMS:
+                continue
+            region = f"{chrom}:{start}-{end}"
 
-JOINT_SNP_VCF = VCF("/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/Illumina-dragen_v4.2.4/dragen_v4.2.4_joint_genotyped/palladium.v4.2.4.grc38.multisample.joint_genotyped.hard-filtered.vcf.gz", gts012=True)
-SMP2IDX = dict(zip(JOINT_SNP_VCF.samples, range(len(JOINT_SNP_VCF.samples))))
+            
+            informative_phases = catalog_informative_sites(
+                SNP_VCF,
+                region,
+                args.dad_id,
+                args.mom_id,
+                args.focal,
+                SMP2IDX,
+            )
 
-MOM_VCF = VCF("tr_validation/data/hiphase/NA12878.GRCh38.deepvariant.glnexus.phased.vcf.gz", gts012=True)
-DAD_VCF = VCF("tr_validation/data/hiphase/NA12877.GRCh38.deepvariant.glnexus.phased.vcf.gz", gts012=True)
-KID_VCF = VCF("tr_validation/data/hiphase/NA12886.GRCh38.deepvariant.glnexus.phased.vcf.gz", gts012=True)
-KID_STR_VCF = VCF("tr_validation/data/hiphase/2189_SF_GRCh38_50bp_merge.sorted.phased.vcf.gz", gts012=True)
+            if informative_phases.shape[0] == 0: continue
+            informative_phases["phase_block_chrom"] = chrom
+            informative_phases["phase_block_start"] = start
+            informative_phases["phase_block_end"] = end
+            informative_sites.append(informative_phases)
 
-KID_DNMS = "tr_validation/data/df_transmission_C0_T0.parquet.gzip"
-DNM_PREF = "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/TRGT/from_aws/GRCh38_v1.0_50bp_merge/493ef25/trgt-denovo/"
-KID_DNMS = f"{DNM_PREF}/2189_SF_GRCh38_50bp_merge_trgtdn.csv.gz"
+    informative_sites = pd.concat(informative_sites)
 
-KID_PHASE_BLOCKS = "tr_validation/data/hiphase/NA12886.GRCh38.hiphase.blocks.tsv"
+    informative_sites.to_csv(args.out, index=False)
 
-CHROMS = [f"chr{c}" for c in range(1, 23)]
-#CHROMS = ["chr21"]
-
-informative_sites = []
-
-with open(KID_PHASE_BLOCKS, "r") as infh:
-    csvf = csv.reader(infh, delimiter="\t")
-    header = None
-    for i,l in tqdm.tqdm(enumerate(csvf)):
-        if header is None:
-            header = l
-            continue
-        d = dict(zip(header, l))
-        chrom, start, end = d["chrom"], d["start"], d["end"]
-        if chrom not in CHROMS:
-            continue
-        region = f"{chrom}:{start}-{end}"
-
-        # inf_sites_mom = catalog_informative_sites(
-        #     MOM_VCF,
-        #     region,
-        #     individual="mom",
-        #     expected_gts=[1, 2],
-        # )
-        # inf_sites_dad = catalog_informative_sites(
-        #     DAD_VCF,
-        #     region,
-        #     individual="dad",
-        #     expected_gts=[1, 2],
-        # )
-        inf_sites = catalog_informative_sites_parents(JOINT_SNP_VCF, region, ["2209", "2188"], SMP2IDX)
-        het_sites_kid = catalog_informative_sites(
-            KID_VCF,
-            region,
-        )
-
-        if any([idf.shape[0] == 0 for idf in (inf_sites, het_sites_kid)]): continue
-
-        #inf_sites = inf_sites_mom.merge(inf_sites_dad, on=["chrom", "pos"])
-
-        # figure out the parental origin of the REF or ALT alleles in the child.
-        # since we only consider sites at which one parent is HOM_ALT and the other is HET,
-        # we can always know for sure which parent donated either allele.
-        #inf_sites = inf_sites[inf_sites["mom_gt"] != inf_sites["dad_gt"]]
-        # if dad's genotype is 1, we know that the origin of the REF allele is dad. if 
-        # dad's genotype is 2, we know the REF allele is from mom. similarly, if dad's 
-        # genotype is 1, we know the ALT came from mom.
-        #inf_sites["ref_origin"] = inf_sites["dad_gt"].apply(lambda g: "F" if g == 1 else "M")
-        #inf_sites["alt_origin"] = inf_sites["dad_gt"].apply(lambda g: "M" if g == 1 else "F")
-        inf_sites = inf_sites.merge(het_sites_kid, on=["chrom", "pos"])
-        if inf_sites.shape[0] == 0: continue
-        #print (inf_sites)
-
-        # now that we know the parental origins of the REF/ALT alleles, we can now determine
-        # the parent-of-origin for each of the two haplotypes in the child. e.g., if the child's
-        # phased genotype at this informative site is 0|1, and we know that mom was 1/1 and dad was 0/1
-        # at this site, we know that mom donated the ALT allele and dad donated the REF allele. thus,
-        # the A haplotype is derived from dad and the B haplotype is derived from mom.
-        inf_sites["haplotype_A_parent"] = inf_sites.apply(lambda row: row["alt_parent"] if row["haplotype_A_allele"] == 1 else row["ref_parent"], axis=1)
-        inf_sites["haplotype_B_parent"] = inf_sites.apply(lambda row: row["alt_parent"] if row["haplotype_B_allele"] == 1 else row["ref_parent"], axis=1)
-        if inf_sites.shape[0] == 0: continue
-        inf_sites["start"] = start
-        inf_sites["end"] = end
-        informative_sites.append(inf_sites)
-
-informative_sites = pd.concat(informative_sites)
-
-informative_sites.to_csv("inf_sites.csv", index=False)
+if __name__ == "__main__":
+    p = argparse.ArgumentParser()
+    p.add_argument("--phased_snp_vcf")
+    p.add_argument("--phase_blocks")
+    p.add_argument("--focal")
+    p.add_argument("--out")
+    p.add_argument("--dad_id")
+    p.add_argument("--mom_id")
+    args = p.parse_args()
+    main(args)

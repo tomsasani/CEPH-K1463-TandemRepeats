@@ -1,18 +1,15 @@
 from cyvcf2 import VCF
-import cyvcf2
 import pandas as pd
 import csv
 import tqdm
-from typing import List
 from bx.intervals.intersection import Interval, IntervalTree
-from collections import defaultdict
+from collections import defaultdict, Counter
 import gzip
-from schema import DeNovoSchema
 import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np 
-from build_roc_curve_dnms import get_dp
-
+import argparse
+from utils import filter_mutation_dataframe
 
 def make_tree(fh: str):
     """
@@ -51,35 +48,25 @@ def in_phase_block(row: pd.Series, phase_tree):
         return chrom + ":" + "-".join(list(map(str, [res[0].start, res[0].end])))
 
 
-def main():
-    KID_STR_VCF = VCF("tr_validation/data/hiphase/2189_SF_GRCh38_50bp_merge.sorted.phased.vcf.gz", gts012=True)
+def main(args):
 
-    DNM_PREF = "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/TRGT/from_aws/GRCh38_v1.0_50bp_merge/493ef25/trgt-denovo/"
-    KID_DNMS = f"{DNM_PREF}/2189_SF_GRCh38_50bp_merge_trgtdn.csv.gz"
-
-    KID_PHASE_BLOCKS = "tr_validation/data/hiphase/NA12886.GRCh38.hiphase.blocks.tsv"
+    KID_STR_VCF = VCF(args.str_vcf, gts012=True)
 
     CHROMS = [f"chr{c}" for c in range(1, 23)]
 
-    informative_sites = pd.read_csv("inf_sites.csv", dtype={"haplotype_A_parent": str, "haplotype_B_parent": str})
-
-    mutations = pd.read_csv(KID_DNMS, sep="\t")
-
-    mutations = mutations[mutations["denovo_coverage"] >= 1]
-    # only look at autosomes
-    mutations = mutations[~mutations["trid"].str.contains("X|Y|Un|random", regex=True)]
-    mutations = mutations[~mutations["child_motif_counts"].str.contains("_")]
-
-    #mutations = mutations[(mutations["child_dropout"] == "N") & (mutations["mother_dropout"] == "N") & (mutations["father_dropout"] == "N")]
-
-    mutations["mom_coverage"] = mutations["per_allele_reads_mother"].apply(
-        lambda a: get_dp(a)
-    )
-    mutations["dad_coverage"] = mutations["per_allele_reads_father"].apply(
-        lambda a: get_dp(a)
+    informative_sites = pd.read_csv(
+        args.informative_sites,
+        dtype={"haplotype_A_parent": str, "haplotype_B_parent": str},
     )
 
-    phase_tree = make_tree(KID_PHASE_BLOCKS)
+    mutations = pd.read_csv(args.mutations, sep="\t")
+    mutations = filter_mutation_dataframe(
+        mutations,
+        remove_complex=True,
+        remove_duplicates=True,
+    )
+
+    phase_tree = make_tree(args.phase_blocks)
 
     print (f"Total of {mutations.shape[0]} DNMs")
     mutations["phase_block"] = mutations.apply(lambda row: in_phase_block(row, phase_tree), axis=1)
@@ -91,6 +78,8 @@ def main():
     dnm_phases = []
 
     WRONG_TRID, NOT_PHASED, NON_AUTOSOMAL = 0, 0, 0
+
+    # index let's us figure out which of the two alleles in the VCF have the allele
 
     # loop over mutations in the dataframe
     for _, row in tqdm.tqdm(mutations.iterrows()):
@@ -108,7 +97,6 @@ def main():
 
         region = f"{chrom}:{start}-{end}"
 
-        # figure out genotype that is the de novo
         denovo_gt = row["genotype"]
         phase_block = row["phase_block"]
         phase_chrom = phase_block.split(":")[0]
@@ -123,7 +111,12 @@ def main():
                 continue
 
             # get phased genotype
-            hap_a, hap_b, is_phased = var.genotypes[0]
+            is_phased = False
+            try:
+                hap_a, hap_b, is_phased = var.genotypes[0]
+            except ValueError: 
+                print ("### WARNING ###", var.genotypes[0])
+                continue
             if not is_phased: 
                 NOT_PHASED += 1
                 continue
@@ -131,6 +124,7 @@ def main():
             # figure out haplotype ID on which DNM resides
             if hap_a == denovo_gt:
                 denovo_hap_id = "A"
+
             elif hap_b == denovo_gt:
                 denovo_hap_id = "B"
             else:
@@ -139,11 +133,10 @@ def main():
             row_dict = row.to_dict()
             row_dict.update(
                 {
-                    "trid": trid,
                     "denovo_hap_id": denovo_hap_id,
-                    "chrom": phase_chrom,
-                    "start": phase_start,
-                    "end": phase_end,
+                    "phase_block_chrom": phase_chrom,
+                    "phase_block_start": phase_start,
+                    "phase_block_end": phase_end,
                 }
             )
             dnm_phases.append(row_dict)
@@ -154,162 +147,235 @@ def main():
     print (f"Total of {n_phased_denovos} phased DNMs")
     print (f"{WRONG_TRID} with non-matching TRIDs, {NOT_PHASED} that weren't phased, {NON_AUTOSOMAL} not on autosomes.")
 
-    merged_dnms_inf = dnm_phases.merge(informative_sites, on=["chrom", "start", "end"], how="left")
+    merged_dnms_inf = dnm_phases.merge(
+        informative_sites,
+        on=["phase_block_chrom", "phase_block_start", "phase_block_end"],
+    )
 
-    merged_dnms_inf["phase"] = merged_dnms_inf.apply(lambda row: row["haplotype_{}_parent".format(row["denovo_hap_id"])], axis=1)
-    print (merged_dnms_inf.groupby("phase").size())
+    merged_dnms_inf.dropna(inplace=True)
 
-    merged_dnms_inf.drop_duplicates(["trid"]).drop(
-        columns=[
-            "chrom",
-            "start",
-            "end",
-            "haplotype_A_parent",
-            "haplotype_B_parent",
-            "phase_block",
-            "pos",
-            "alt_parent",
-            "ref_parent",
-            "gt",
-            "haplotype_A_allele",
-            "haplotype_B_allele",
-            "denovo_hap_id",
-        ]
-    ).fillna({"phase": "NA"}).to_csv("phased.csv", index=False)
+    merged_dnms_inf["phase"] = merged_dnms_inf.apply(lambda row: row["haplotype_{}_origin".format(row["denovo_hap_id"])], axis=1)
 
-    print (merged_dnms_inf.dtypes)
-
-
+    # for a given informative site, we can now ask if we were able
+    # to determine the actual *haplotype* the parent-of-origin donated
+    # to the child
+    merged_dnms_inf["phase_haplotype_origin"] = merged_dnms_inf.apply(lambda row: row[f"{row['phase']}_haplotype_origin"], axis=1,)
 
     # add midpoint of STR to dataframe
     merged_dnms_inf["str_midpoint"] = merged_dnms_inf["trid"].apply(lambda t: np.mean(list(map(int, t.split("_")[1:-1]))))
+    merged_dnms_inf["diff_to_str"] = merged_dnms_inf["pos"] - merged_dnms_inf["str_midpoint"]
 
-    ###
-    # require informative sites on either side?
-    ###
+    # limit to DNMs with at least one upstream and one downstream site. require both to support
+    # the same phase, otherwise ambiguous.
 
-    N_INF = 10
+    merged_dnms_inf["is_upstream"] = merged_dnms_inf["diff_to_str"] < 0
+    merged_dnms_inf["is_downstream"] = merged_dnms_inf["diff_to_str"] > 0
 
-    res = []
-    for trid, trid_df in merged_dnms_inf.groupby("trid"):
-        # sort by informative site
-        trid_df = trid_df.sort_values("pos")
-        trid_df["diff_to_str"] = trid_df["pos"] - trid_df["str_midpoint"]
-        # pick N sites up and downstream of the STR
-        upstream_sites = trid_df.query("diff_to_str < 0")
-        downstream_sites = trid_df.query("diff_to_str > 0")
-        if upstream_sites.shape[0] < N_INF: continue
-        if downstream_sites.shape[0] < N_INF: continue
-        # get nearest N
-        nearest_up = upstream_sites.tail(N_INF)
-        nearest_dn = downstream_sites.head(N_INF)
-        res.append(pd.concat([nearest_up, nearest_dn]))
-        #break
-    merged_dnms_inf = pd.concat(res)
+    TRID_COLS = ["trid", "index"]#, "phase_haplotype_origin"]
 
-    merged = merged_dnms_inf.groupby(["trid", "phase"]).size().reset_index().rename(columns={0: "count"})
-    merged_totals = merged.groupby("trid").agg({"count": "sum"}).reset_index().rename(columns={"count": "total"})
-    merged = merged.merge(merged_totals, on="trid")
-    merged["frac"] = merged["count"] / merged["total"]
-    merged = merged.sort_values(["trid", "frac"], ascending=False).drop_duplicates(["trid"], keep="first")
-
-    # filter on number of INF sites that support
-    merged = merged[merged["frac"] == 1.]
-    # merged = merged.drop_duplicates(["trid"])
-    # at each informative site, examine the phase of the de novo allele with the parental alleles.
-    print (merged.groupby("phase").size())
-
-    # at various filtering values, what is the ratio of paternal to maternal mutations?
-    # coverage_thresh = np.arange(0, 30, 5)
-    # denovo_thresh = np.arange(0, 10, 1)
-    # res = []
-    # for cov in coverage_thresh:
-    #     for den in denovo_thresh:
-    #         mutations_filt = merged_dnms_inf[(merged_dnms_inf["child_coverage"] >= cov) & (merged_dnms_inf["mom_coverage"] >= cov) & (merged_dnms_inf["dad_coverage"] >= cov)]
-    #         mutations_filt = mutations_filt[mutations_filt["denovo_coverage"] >= den]
-
-    #         mutations_filt["is_paternal"] = mutations_filt["phase"] == 2209
-    #         #phased_counts = mutations_filt.groupby("phase").size().reset_index().rename(columns={0: "count"})
-    #         #if phased_counts.shape[0] == 0: continue
-            
-    #         #phased_counts["fraction"] = phased_counts["count"] / mutations_filt.shape[0]
-    #         #if "2209" not in phased_counts["phase"].to_list():
-    #         #     paternal = 0.
-    #         # else:
-    #         #     paternal = phased_counts[phased_counts["phase"] == "2209"]["fraction"].values[0]
-    #         phased_counts = mutations_filt[["is_paternal"]]
-    #         phased_counts["cov"] = cov
-    #         phased_counts["den"] = den
-    #         res.append(phased_counts)
-    #         # res.append({"paternal_frac": paternal, "Min. DP across trio": cov, "Min. DN coverage in child": den})
-    # res_df = pd.concat(res)
-
-    # print (res_df)
-
-    # f, ax = plt.subplots()
-    # sns.pointplot(x="den", y="is_paternal")
-    # sns.scatterplot(data=res_df.query("paternal_frac > 0"), x="Min. DN coverage in child", y="paternal_frac", hue="Min. DP across trio", ax=ax)
-    # ax.set_ylabel("Fraction of putative DNMs\nphased to paternal haplotype")
-    # sns.despine(ax=ax, top=True, right=True)
-    # f.tight_layout()
-    # f.savefig("scatterphase.png", dpi=200)
-    #mutations = mutations[mutations["allele_ratio"] >= 0.5]
-
-    f, ax = plt.subplots()
-    sns.histplot(
-        data=merged,
-        x="frac",
-        hue="phase",
-        stat="proportion",
-        #cumulative=True,
-        element="step",
-        fill=False,
-        ax=ax,
+    updown = (
+        merged_dnms_inf.groupby(TRID_COLS)
+        .agg({"is_upstream": "sum", "is_downstream": "sum"})
+        .reset_index()
+        .rename(
+            columns={
+                "is_upstream": "n_upstream",
+                "is_downstream": "n_downstream",
+                "phase_haplotype_origin": "phase_haplotype_origin_summary",
+            }
+        )
     )
-    ax.set_xlabel("Fraction of informative sites\nthat support phase assignment")
-    ax.set_ylabel("Fraction of DNMs")
-    sns.despine(ax=ax, top=True, right=True)
-    f.tight_layout()
-    f.savefig('phase.png', dpi=200)
 
-    n_phased_denovos = merged_dnms_inf["trid"].nunique()
-    print (f"Total of {n_phased_denovos} confidently phased DNMs")
+    merged_dnms_inf = merged_dnms_inf.merge(updown, on=TRID_COLS)
 
-    trids = merged_dnms_inf["trid"].unique()
-    focal_trid = trids[np.random.randint(len(trids))]
+    # require a certain number of informative sites on either side
+    MIN_INF = 1
+    merged_dnms_inf = merged_dnms_inf.query(f"n_upstream >= {MIN_INF} and n_downstream >= {MIN_INF}")
 
-    merged_focal = merged_dnms_inf[merged_dnms_inf["trid"] == focal_trid]
+    # for each DNM, create a new dataframe that only includes the informative sites that match the phase
+    # at the focal (DNM) site.
+    closest_inf_sites = []
+    for trid, trid_df in merged_dnms_inf.groupby(TRID_COLS):
+        # sort the informative sites by absolute distance to the STR
+        trid_df["abs_diff_to_str"] = np.abs(trid_df["diff_to_str"])
+        trid_df_sorted = trid_df.sort_values("abs_diff_to_str", ascending=True).reset_index()
+        sorted_phases = trid_df_sorted["phase"].values
 
-    xvals = merged_focal["pos"].values
-    y1 = merged_focal["haplotype_A_parent"] == "2209"
-    y2 = merged_focal["haplotype_B_parent"] == "2209"
+        # figure out how many sites are consistent closest to the STR. we can do this
+        # simply by figuring out the first index where they are *inconsistent.*
+        inconsistent_phases = np.where(sorted_phases[1:] != sorted_phases[:-1])[0]
+        # if none are inconsistent, all are consistent!
+        if inconsistent_phases.shape[0] == 0:
+            final_consistent = -1
+        else:
+            final_consistent = inconsistent_phases[0]
 
-    chrom, start, end, _ = focal_trid.split("_")
-    focal_hap_id = merged_focal["denovo_hap_id"].unique()[0]
+        trid_df_sorted_consistent = trid_df_sorted.iloc[:final_consistent]
 
-    f, (ax1, ax2) = plt.subplots(2, figsize=(9, 5), sharex=True)
+        consistent_diffs = trid_df_sorted_consistent["diff_to_str"]
 
-    ax1.scatter(xvals, y1, alpha=0.25)
-    ax2.scatter(xvals, y2, alpha=0.25)
+        trid_df["n_consistent_upstream"] = np.sum(consistent_diffs < 0)
+        trid_df["n_consistent_downstream"] = np.sum(consistent_diffs > 0)
 
-    if focal_hap_id == "A":
-        ax1.scatter((int(end) + int(start)) / 2, 0.5, marker="s", c="k", label="DNM")
-    else:
-        ax2.scatter((int(end) + int(start)) / 2, 0.5, marker="s", c="k", label="DNM")
+        # now, using the informative sites with consistent phase, figureo out consistency of
+        # the parental haplotype of origin.
+        trid_df_sorted_consistent = trid_df_sorted_consistent[trid_df_sorted_consistent["phase_haplotype_origin"] != "?"]
+        assert np.all(np.diff(trid_df_sorted_consistent["abs_diff_to_str"]) >= 0)
 
-    for ax in (ax1, ax2):
+        sorted_haplotype_origins = trid_df_sorted_consistent["phase_haplotype_origin"].values
+
+        inconsistent_haplotype_origins = np.where(sorted_haplotype_origins[1:] != sorted_haplotype_origins[:-1])[0]
+        if inconsistent_haplotype_origins.shape[0] == 0:
+            final_consistent = -1
+        else:
+            final_consistent = inconsistent_haplotype_origins[0]
+
+        consistent_diffs = trid_df_sorted_consistent["diff_to_str"].values[:final_consistent]
+        consistent_haplotype_origins = trid_df_sorted_consistent["phase_haplotype_origin"].values[:final_consistent]
+
+        trid_df["n_consistent_upstream_origin"] = np.sum(consistent_diffs < 0)
+        trid_df["n_consistent_downstream_origin"] = np.sum(consistent_diffs > 0)
+
+        agg_hap_origins = Counter(consistent_haplotype_origins).most_common()
+        agg_hap_origins = "|".join([":".join(list(map(str, el))) for el in agg_hap_origins])
+        trid_df["phase_haplotype_origin_summary"] = agg_hap_origins
+
+        closest_inf_sites.append(trid_df)
+    merged_dnms_inf = pd.concat(closest_inf_sites)
+
+    merged_dnms_inf["sample_id"] = args.focal
+    merged_dnms_inf["true_phase"] = merged_dnms_inf["phase"]#.apply(lambda p: phase_dict[str(p)])
+
+    merged_dnms_inf.drop_duplicates(TRID_COLS).drop(
+        columns=[
+            "phase_block_chrom",
+            "phase_block_start",
+            "phase_block_end",
+            "haplotype_A_origin",
+            "haplotype_B_origin",
+            "dad_haplotype_origin",
+            "mom_haplotype_origin",
+            "phase_block",
+            "chrom",
+            "pos",
+            "dad_gt",
+            "mom_gt",
+            "kid_gt",
+            "phase_haplotype_origin",
+            "str_midpoint",
+            "diff_to_str",
+            "is_upstream",
+            "is_downstream",
+            "abs_diff_to_str",
+            "denovo_hap_id",
+        ]
+    ).fillna({"phase": "NA"}).to_csv(args.out, index=False)
+
+    trids = merged_dnms_inf.query("n_upstream >= 10 and n_consistent_upstream <= 5 and n_downstream >= 10 and n_consistent_downstream <= 5")["trid"].unique()
+    trids = merged_dnms_inf.query("n_upstream >= 20 and n_downstream >= 20")["trid"].unique()
+
+    # print (len(merged_dnms_inf["trid"].unique()))
+    # print (len(merged_dnms_inf[(merged_dnms_inf["n_consistent_upstream"] < merged_dnms_inf["n_upstream"]) | (merged_dnms_inf["n_consistent_downstream"] < merged_dnms_inf["n_upstream"])]["trid"].unique()))
+    if trids.shape[0] > 0:
+        focal_trid = trids[np.random.randint(len(trids))]
+        merged_focal = merged_dnms_inf[merged_dnms_inf["trid"] == focal_trid]
+
+        chrom, start, end, _ = focal_trid.split("_")
+        focal_hap_id = merged_focal["denovo_hap_id"].unique()[0]
+        xvals = merged_focal["pos"].values
+
+        y1 = merged_focal[f"haplotype_A_origin"] == "dad"
+        y2 = merged_focal[f"haplotype_B_origin"] == "dad"
+
+        f, ax = plt.subplots(figsize=(9, 4))
+
+        for y_ in np.unique(y1):
+            y_idxs = np.where(y1 == y_)[0]
+
+            phase = "dad" if y_ else "mom"
+
+            xs = xvals[y_idxs]
+            ys = [
+                (
+                    -0.25
+                    if haplotype_origin == "A"
+                    else 0 if haplotype_origin == "?" else 0.25
+                )
+                for haplotype_origin in merged_focal[
+                    f"{phase}_haplotype_origin"
+                ].values[y_idxs]
+            ]
+
+            ax.scatter(
+                xs,
+                ys,
+                c="firebrick" if y_ else "dodgerblue",
+                label="paternal" if y_ else "maternal",
+                alpha=0.25,
+            )
+
+        for y_ in np.unique(y2):
+            y_idxs = np.where(y2 == y_)[0]
+
+            phase = "dad" if y_ else "mom"
+
+            xs = xvals[y_idxs]
+            ys = [
+                (
+                    0.75
+                    if haplotype_origin == "A"
+                    else 1 if haplotype_origin == "?" else 1.25
+                )
+                for haplotype_origin in merged_focal[
+                    f"{phase}_haplotype_origin"
+                ].values[y_idxs]
+            ]
+
+            ax.scatter(
+                xs,
+                ys,
+                c="firebrick" if y_ else "dodgerblue",
+                #label="paternal" if y_ else "maternal",
+                alpha=0.25,
+            )
+
+        if focal_hap_id == "A":
+            ax.scatter((int(end) + int(start)) / 2, 0, marker="s", c="k", label="DNM")
+        else:
+            ax.scatter((int(end) + int(start)) / 2, 1, marker="s", c="k", label="DNM")
+
+        # for ax in (ax1, ax2):
         sns.despine(ax=ax, top=True, right=True)
-        ax.set_yticks([-0.05, 1.05])
-        ax.set_yticklabels(["maternal", "paternal"])
-        ax.set_ylabel("Inferred phase")
+        ax.set_yticks([-0.25, 0, 0.25, 0.75, 1, 1.25])
+        ax.set_yticklabels(
+            [
+                "A (A)",
+                "A (?)",
+                "A (B)",
+                "B (A)",
+                "B (?)",
+                "B (B)",
+            ]
+        )
+        ax.set_ylabel("Haplotype ID")
         ax.legend(frameon=False)
-    ax2.set_xlabel("Position (bp)")
-    ax1.set_title("Haplotype A")
-    ax2.set_title("Haplotype B")
+        ax.set_xlabel("Position (bp)")
+        ax.set_title(focal_trid)
 
-    f.tight_layout()
-    f.savefig('phase_assignment.png', dpi=200)
+        f.tight_layout()
+        f.savefig(f'{args.focal}.phase_assignment.png', dpi=200)
 
 
 if __name__ == "__main__":
-    main()
+    p = argparse.ArgumentParser()
+    p.add_argument("--mutations")
+    p.add_argument("--phase_blocks")
+    p.add_argument("--informative_sites")
+    p.add_argument("--ped")
+    p.add_argument("--focal")
+    p.add_argument("--out")
+    p.add_argument("--str_vcf")
+    p.add_argument("--dad_id")
+    p.add_argument("--mom_id")
+    args = p.parse_args()
+    main(args)
