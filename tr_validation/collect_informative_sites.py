@@ -113,13 +113,24 @@ def catalog_informative_sites(
 
     res = []
     for v in vcf(region):
-        if not var_pass(
-            v,
-            np.array([dad_idx, mom_idx, kid_idx]),
-        ):
+        if not var_pass(v, np.array([dad_idx, mom_idx, kid_idx])):
             continue
 
         gts = v.genotypes
+
+        # access phase block PS tags. for a given sample, if two
+        # variants in two different VCFs share a PS tag, their phases
+        # can be inferred to be the same. e.g., a 0|1 SNP and 0|1 STR
+        # are phased together.
+        ps_tags = v.format("PS")
+        if ps_tags is None: continue
+        ps_tags = ps_tags[:, 0]
+
+        dad_ps, mom_ps, kid_ps = (
+            ps_tags[dad_idx],
+            ps_tags[mom_idx],
+            ps_tags[kid_idx],
+        )
 
         dad_hap_0, dad_hap_1, dad_phased = gts[dad_idx]
         mom_hap_0, mom_hap_1, mom_phased = gts[mom_idx]
@@ -161,9 +172,12 @@ def catalog_informative_sites(
         out_dict = {
             "chrom": v.CHROM,
             "pos": v.POS,
-            "dad_gt": "|".join((str(dad_hap_0), str(dad_hap_1))) if dad_phased else "/".join((str(dad_hap_0), str(dad_hap_1))),
-            "mom_gt": "|".join((str(mom_hap_0), str(mom_hap_1))) if mom_phased else "/".join((str(mom_hap_0), str(mom_hap_1))),
-            "kid_gt": "|".join((str(kid_hap_0), str(kid_hap_1))),
+            "dad_inf_gt": "|".join((str(dad_hap_0), str(dad_hap_1))) if dad_phased else "/".join((str(dad_hap_0), str(dad_hap_1))),
+            "mom_inf_gt": "|".join((str(mom_hap_0), str(mom_hap_1))) if mom_phased else "/".join((str(mom_hap_0), str(mom_hap_1))),
+            "kid_inf_gt": "|".join((str(kid_hap_0), str(kid_hap_1))),
+            "dad_inf_ps": dad_ps,# if dad_ps > 0 else "UNK",
+            "mom_inf_ps": mom_ps,# if mom_ps > 0 else "UNK",
+            "kid_inf_ps": kid_ps,# if kid_ps > 0 else "UNK",
             "haplotype_A_origin": hap_0_origin,
             "haplotype_B_origin": hap_1_origin,
             "dad_haplotype_origin": dad_haplotype_origin,
