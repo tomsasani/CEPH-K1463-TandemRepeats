@@ -10,7 +10,6 @@ def filter_mutation_dataframe(
     remove_complex: bool = True,
     remove_duplicates: bool = True,
     mc_column: str = "child_MC",
-    al_column: str = "child_AL",
 ):
 
     mutations = mutations[mutations["denovo_coverage"] >= 1]
@@ -18,16 +17,7 @@ def filter_mutation_dataframe(
     mutations = mutations[~mutations["trid"].str.contains("X|Y|Un|random", regex=True)]
     # no parental dropout
     mutations = mutations[(mutations["father_dropout"] == "N") & (mutations["mother_dropout"] == "N")]
-    # only expansions/contractions
-    mutations["expansion_size"] = mutations[al_column].apply(
-        lambda c: (
-            int(c.split(",")[1]) - int(c.split(",")[0])
-            if len(c.split(",")) > 1
-            else np.nan
-        )
-    )
-    mutations.dropna(subset=["expansion_size"], inplace=True)
-    mutations = mutations[mutations["expansion_size"] != 0]
+    
     if remove_complex:
         mutations = mutations[~mutations[mc_column].str.contains("_")]
     if remove_duplicates:

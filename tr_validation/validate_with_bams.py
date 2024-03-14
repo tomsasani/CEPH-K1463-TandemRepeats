@@ -19,7 +19,7 @@ def read_bam(fh: str):
     # read in BAM files for this sample, as well as parents if applicable
     bam = (
         pysam.AlignmentFile(fh, "rb" if fh.endswith("bam") else "rc")
-        if fh != "None"
+        if fh not in ("None", None)
         else None
     )
 
@@ -48,6 +48,8 @@ def main(args):
 
     # read in the VCF file
     vcf = VCF(args.vcf, gts012=True)
+
+    print (args.mom_bam, args.dad_bam)
 
     # read in BAM files for this sample, as well as parents if applicable
     kid_bam, mom_bam, dad_bam = (
