@@ -14,17 +14,26 @@ def main(args):
 
     merged_dnms_inf_totals = (
         merged_dnms_inf.groupby(COLS)
-        .agg({"is_upstream": "sum", "is_downstream": "sum", "str_parent_of_origin": lambda p: ":".join(list(map(str, Counter(p).most_common()[0])))})
+        .agg(
+            {
+                "is_upstream": "sum",
+                "is_downstream": "sum",
+                "str_parent_of_origin": lambda p: ":".join(
+                    list(map(str, Counter(p).most_common()[0]))
+                ),
+            }
+        )
         .reset_index()
         .rename(
-            columns={"is_upstream": "n_upstream", "is_downstream": "n_downstream", "str_parent_of_origin": "phase_summary"},
+            columns={
+                "is_upstream": "n_upstream",
+                "is_downstream": "n_downstream",
+                "str_parent_of_origin": "phase_summary",
+            },
         )
     )
 
-    print (merged_dnms_inf_totals.groupby(COLS).size().sort_values())
-
-    # print (merged_dnms_inf_totals[merged_dnms_inf_totals["trid"] == "chr7_150033538_150042643_trsolve"])
-
+    # drop unneccessary columns that only apply to single informative sites
     merged_dnms_inf = merged_dnms_inf.merge(merged_dnms_inf_totals).drop(
         columns=[
             "is_upstream",
@@ -41,11 +50,10 @@ def main(args):
             "haplotype_B_origin",
             "dad_haplotype_origin",
             "mom_haplotype_origin",
-            "str_midpoint",
         ]
     )
 
-    merged_dnms_inf.drop_duplicates(COLS).to_csv(args.out, sep="\t", index=False)
+    merged_dnms_inf.drop_duplicates(COLS + ["phase_summary"]).to_csv(args.out, sep="\t", index=False)
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()

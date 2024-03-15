@@ -80,10 +80,10 @@ import argparse
 
 def var_pass(v: cyvcf2.Variant, idxs: np.ndarray):
 
-    GT2ALT_AB = {0: (0., 0.05), 1: (0.2, 0.8), 2: (0.95, 1.)}
+    GT2ALT_AB = {0: (0., 0.), 1: (0.2, 0.8), 2: (1., 1.)}
 
     if v.var_type != "snp": return False
-    if v.call_rate < 1.: return False
+    #if v.call_rate < 1.: return False
     if np.any(v.gt_quals[idxs] < 20): return False
     if len(v.ALT) > 1: return False
     rd, ad = v.gt_ref_depths, v.gt_alt_depths
@@ -92,9 +92,10 @@ def var_pass(v: cyvcf2.Variant, idxs: np.ndarray):
     if np.any(td[idxs] < 10): return False
 
     gts = v.gt_types
+    if np.any(gts[idxs] == 3): return False
     for idx in idxs:
         min_ab, max_ab = GT2ALT_AB[gts[idx]]
-        if ab[idx] < min_ab or ab[idx] > max_ab: 
+        if not (min_ab <= ab[idx] <= max_ab): 
             return False
 
     return True
@@ -146,10 +147,10 @@ def catalog_informative_sites(
         if not kid_phased: continue
         if kid_hap_0 + kid_hap_1 != 1: continue
 
-        if not dad_phased: 
-            if dad_hap_0 != dad_hap_1: continue
-        if not mom_phased: 
-            if mom_hap_0 != mom_hap_1: continue
+        # if not dad_phased: 
+        #     if dad_hap_0 != dad_hap_1: continue
+        # if not mom_phased: 
+        #     if mom_hap_0 != mom_hap_1: continue
 
         hap_0_origin, hap_1_origin = None, None
         if dad_gt > mom_gt:
@@ -159,25 +160,26 @@ def catalog_informative_sites(
             hap_0_origin = "mom" if kid_hap_0 == 1 else "dad"
             hap_1_origin = "mom" if kid_hap_1 == 1 else "dad"
 
+
         dad_haplotype_origin, mom_haplotype_origin = "?", "?"
-        if dad_gt > mom_gt and dad_phased:
-            dad_haplotype_origin = "A" if dad_hap_0 == 1 else "B"
-        elif mom_gt > dad_gt and mom_phased:
-            mom_haplotype_origin = "A" if mom_hap_0 == 1 else "B"
-        elif dad_gt < mom_gt and dad_phased:
-            dad_haplotype_origin = "A" if dad_hap_0 == 0 else "B"
-        elif mom_gt < dad_gt and mom_phased:
-            mom_haplotype_origin = "A" if mom_hap_0 == 0 else "B"
+        # if dad_gt > mom_gt and dad_phased:
+        #     dad_haplotype_origin = "A" if dad_hap_0 == 1 else "B"
+        # elif mom_gt > dad_gt and mom_phased:
+        #     mom_haplotype_origin = "A" if mom_hap_0 == 1 else "B"
+        # elif dad_gt < mom_gt and dad_phased:
+        #     dad_haplotype_origin = "A" if dad_hap_0 == 0 else "B"
+        # elif mom_gt < dad_gt and mom_phased:
+        #     mom_haplotype_origin = "A" if mom_hap_0 == 0 else "B"
 
         out_dict = {
-            "chrom": v.CHROM,
-            "pos": v.POS,
+            "inf_chrom": v.CHROM,
+            "inf_pos": v.POS,
             "dad_inf_gt": "|".join((str(dad_hap_0), str(dad_hap_1))) if dad_phased else "/".join((str(dad_hap_0), str(dad_hap_1))),
             "mom_inf_gt": "|".join((str(mom_hap_0), str(mom_hap_1))) if mom_phased else "/".join((str(mom_hap_0), str(mom_hap_1))),
             "kid_inf_gt": "|".join((str(kid_hap_0), str(kid_hap_1))),
-            "dad_inf_ps": dad_ps,# if dad_ps > 0 else "UNK",
-            "mom_inf_ps": mom_ps,# if mom_ps > 0 else "UNK",
-            "kid_inf_ps": kid_ps,# if kid_ps > 0 else "UNK",
+            # "dad_inf_ps": dad_ps,
+            # "mom_inf_ps": mom_ps,
+            "kid_inf_ps": kid_ps,
             "haplotype_A_origin": hap_0_origin,
             "haplotype_B_origin": hap_1_origin,
             "dad_haplotype_origin": dad_haplotype_origin,

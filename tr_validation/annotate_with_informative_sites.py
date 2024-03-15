@@ -11,20 +11,23 @@ import numpy as np
 import argparse
 from utils import filter_mutation_dataframe
 from collect_informative_sites import catalog_informative_sites
+from typing import List
 
-
-def measure_consistency(df: pd.DataFrame, column: str):
+def measure_consistency(df: pd.DataFrame, columns: List[str]):
 
     res = []
     for (trid, genotype), trid_df in df.groupby(["trid", "genotype"]):
         # sort the informative sites by absolute distance to the STR
         trid_df_sorted = trid_df.sort_values("abs_diff_to_str", ascending=True).reset_index(drop=True)
 
-        sorted_values = trid_df[column].values
+        sorted_values = trid_df[columns].values
 
         # figure out how many sites are consistent closest to the STR. we can do this
         # simply by figuring out the first index where they are *inconsistent.*
         inconsistent_phases = np.where(sorted_values[1:] != sorted_values[:-1])[0]
+
+        # print (sorted_values)
+        # print (sorted_values[1:] == sorted_values[:-1])
 
         # if none are inconsistent, all are consistent!
         if inconsistent_phases.shape[0] == 0:
@@ -42,6 +45,8 @@ def main(args):
     KID_STR_VCF = VCF(args.str_vcf, gts012=True)
     SNP_VCF = VCF(args.joint_snp_vcf, gts012=True)
 
+    print (args.focal, args.dad_id, args.mom_id)
+
     SLOP = 10_000
 
     SMP2IDX = dict(zip(SNP_VCF.samples, range(len(SNP_VCF.samples))))
@@ -51,7 +56,7 @@ def main(args):
     mutations = pd.read_csv(args.mutations, sep="\t")
     mutations = filter_mutation_dataframe(
         mutations,
-        remove_complex=True,
+        remove_complex=False,
         remove_duplicates=True,
     )
     print (f"Total of {mutations.shape[0]} DNMs")
@@ -80,7 +85,6 @@ def main(args):
             dnm_phases.append(row_dict)
             continue
 
-        phase_chrom = trid_chrom
         phase_start, phase_end = trid_start - SLOP, trid_end + SLOP
         if phase_start < 1: phase_start = 1
 
@@ -89,7 +93,7 @@ def main(args):
         # at every informative site.
         informative_phases = catalog_informative_sites(
                 SNP_VCF,
-                f"{phase_chrom}:{phase_start}-{phase_end}",
+                f"{trid_chrom}:{phase_start}-{phase_end}",
                 args.dad_id,
                 args.mom_id,
                 args.focal_alt,
@@ -102,9 +106,9 @@ def main(args):
         # add information about the region in which we searched for informative
         # sites to the output dataframe.
         informative_phases["trid"] = trid
-        informative_phases["phase_chrom"] = phase_chrom
-        informative_phases["phase_start"] = phase_start
-        informative_phases["phase_end"] = phase_end
+        # informative_phases["phase_chrom"] = phase_chrom
+        # informative_phases["phase_start"] = phase_start
+        # informative_phases["phase_end"] = phase_end
         informative_sites.append(informative_phases)
 
         denovo_gt = row["genotype"]
@@ -115,6 +119,8 @@ def main(args):
             if var.INFO.get("TRID") != trid: 
                 WRONG_TRID += 1
                 continue
+
+            motif = var.INFO.get("MOTIFS")
 
             # get phased genotype
             is_phased = False
@@ -150,9 +156,10 @@ def main(args):
             row_dict.update(
                 {
                     "denovo_hap_id": denovo_hap_id,
-                    "phase_chrom": phase_chrom,
-                    "phase_start": phase_start,
-                    "phase_end": phase_end,
+                    "motif": motif,
+                    "str_chrom": trid_chrom,
+                    # "phase_start": phase_start,
+                    # "phase_end": phase_end,
                     "denovo_al": denovo_al,
                     "non_denovo_al": orig_al,
                     "kid_str_ps": kid_ps,
@@ -163,6 +170,7 @@ def main(args):
 
     informative_sites = pd.concat(informative_sites)
 
+
     dnm_phases = pd.DataFrame(dnm_phases)
 
     # merge de novo STR information with informative site information.
@@ -171,9 +179,13 @@ def main(args):
     # genotypes at informative sites to infer phases at STRs.
     merged_dnms_inf = dnm_phases.merge(
         informative_sites,
-        left_on=["trid", "phase_chrom", "phase_start", "phase_end", "kid_str_ps"],
-        right_on=["trid", "phase_chrom", "phase_start", "phase_end", "kid_inf_ps"],
+        # left_on=["trid", "phase_chrom", "phase_start", "phase_end", "kid_str_ps"],
+        # right_on=["trid", "phase_chrom", "phase_start", "phase_end", "kid_inf_ps"],
+        left_on=["trid", "str_chrom", "kid_str_ps"],
+        right_on=["trid", "inf_chrom", "kid_inf_ps"],
+        #how="left",
     )
+
 
     # measure the consistency of the haplotype phasing. subset the dataframe to only
     # include the N informative sites that share a consistent haplotype origin 
@@ -195,9 +207,9 @@ def main(args):
         axis=1,
     )
 
-    merged_dnms_inf_consistent["sample_id"] = args.focal
+    
 
-    # print (merged_dnms_inf_consistent.groupby(["trid", "genotype", "str_parent_of_origin"]).size().sort_values())
+    merged_dnms_inf_consistent["sample_id"] = args.focal
 
     merged_dnms_inf_consistent.to_csv(args.out, index=False, sep="\t")
 
