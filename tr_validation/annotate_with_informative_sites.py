@@ -13,14 +13,13 @@ from utils import filter_mutation_dataframe
 from collect_informative_sites import catalog_informative_sites
 
 
-def measure_consistency(df: pd.DataFrame, column: str = "str_parent_of_origin"):
+def measure_consistency(df: pd.DataFrame, column: str):
 
     res = []
-    for trid, trid_df in df.groupby("trid"):
+    for (trid, genotype), trid_df in df.groupby(["trid", "genotype"]):
         # sort the informative sites by absolute distance to the STR
-        trid_df_sorted = trid_df.sort_values("abs_diff_to_str", ascending=True).reset_index()
+        trid_df_sorted = trid_df.sort_values("abs_diff_to_str", ascending=True).reset_index(drop=True)
 
-        # access the inferred phases at every informative site
         sorted_values = trid_df[column].values
 
         # figure out how many sites are consistent closest to the STR. we can do this
@@ -36,14 +35,14 @@ def measure_consistency(df: pd.DataFrame, column: str = "str_parent_of_origin"):
         trid_df_sorted_consistent = trid_df_sorted.iloc[:final_consistent]
         res.append(trid_df_sorted_consistent)
 
-    return pd.concat(res)
+    return pd.concat(res, ignore_index=True)
 
 def main(args):
 
     KID_STR_VCF = VCF(args.str_vcf, gts012=True)
     SNP_VCF = VCF(args.joint_snp_vcf, gts012=True)
 
-    SLOP = 500_000
+    SLOP = 10_000
 
     SMP2IDX = dict(zip(SNP_VCF.samples, range(len(SNP_VCF.samples))))
 
@@ -102,6 +101,7 @@ def main(args):
 
         # add information about the region in which we searched for informative
         # sites to the output dataframe.
+        informative_phases["trid"] = trid
         informative_phases["phase_chrom"] = phase_chrom
         informative_phases["phase_start"] = phase_start
         informative_phases["phase_end"] = phase_end
@@ -171,46 +171,33 @@ def main(args):
     # genotypes at informative sites to infer phases at STRs.
     merged_dnms_inf = dnm_phases.merge(
         informative_sites,
-        left_on=["phase_chrom", "phase_start", "phase_end", "kid_str_ps"],
-        right_on=["phase_chrom", "phase_start", "phase_end", "kid_inf_ps"],
+        left_on=["trid", "phase_chrom", "phase_start", "phase_end", "kid_str_ps"],
+        right_on=["trid", "phase_chrom", "phase_start", "phase_end", "kid_inf_ps"],
     )
 
-    # infer the parent of origin at every informative site. we do this
+    # measure the consistency of the haplotype phasing. subset the dataframe to only
+    # include the N informative sites that share a consistent haplotype origin 
+    # immediately surrounding the STR locus. 
+    # first, figure out the distance between each informative site and the de novo STR
+    merged_dnms_inf["str_midpoint"] = merged_dnms_inf["trid"].apply(lambda t: np.mean(list(map(int, t.split("_")[1:-1]))))
+    merged_dnms_inf["diff_to_str"] = merged_dnms_inf["inf_pos"] - merged_dnms_inf["str_midpoint"]
+    merged_dnms_inf["abs_diff_to_str"] = np.abs(merged_dnms_inf["diff_to_str"])
+
+    merged_dnms_inf_consistent = measure_consistency(merged_dnms_inf, "haplotype_A_origin")
+
+    # now that we have a consistent set of informative sites surrounding the STR,
+    # infer parent of origin for the haplotype that carries the de novo allele.
     # by figuring out the haplotype ID on which the de novo STR occurred (A or B)
-    # and then asking which parent donated the A or B haplotype at the informative site.
-    merged_dnms_inf["str_parent_of_origin"] = merged_dnms_inf.apply(
+    # and then asking which parent consistently donated the A or B haplotype at 
+    # the surrounding informative sites.
+    merged_dnms_inf_consistent["str_parent_of_origin"] = merged_dnms_inf_consistent.apply(
         lambda row: row["haplotype_{}_origin".format(row["denovo_hap_id"])],
         axis=1,
     )
 
-    # for a given informative site, we can now ask if we were able
-    # to determine the actual *haplotype* the parent-of-origin donated
-    # to the child.
+    merged_dnms_inf_consistent["sample_id"] = args.focal
 
-    # NOTE: it's critical to bear in mind that these haplotype origins are
-    # only informative if they occur at sites with PS tags that match the PS
-    # tag of the STR locus in the relevant parent. for example, at an informative site,
-    # if the dad's genotype is 0|1 and mom's genotype is 0/0 and kid's genotype is 1|0,
-    # we know that haplotype A in the child is paternal in origin. at the de novo locus,
-    # if the dad's allele lengths are 12,15 and his genotype is 1|0, we know that the 15 AL
-    # is on the same haplotype that he donated to the kid, ONLY IF the PS tag is the same
-    # at the STR locus.
-    # merged_dnms_inf["parent_haplotype_of_origin"] = merged_dnms_inf.apply(
-    #     lambda row: row[f"{row['str_parent_of_origin']}_haplotype_origin"],
-    #     axis=1,
-    # )
-
-    # merged_dnms_inf = merged_dnms_inf[merged_dnms_inf["parent_haplotype_of_origin"] != "?"]
-
-    merged_dnms_inf["str_midpoint"] = merged_dnms_inf["trid"].apply(lambda t: np.mean(list(map(int, t.split("_")[1:-1]))))
-    merged_dnms_inf["diff_to_str"] = merged_dnms_inf["pos"] - merged_dnms_inf["str_midpoint"]
-    # figure out the distance between each informative site and the de novo STR
-    merged_dnms_inf["abs_diff_to_str"] = np.abs(merged_dnms_inf["diff_to_str"])
-    merged_dnms_inf["sample_id"] = args.focal
-
-    # get a subset of the informative sites, including only those that were consistent
-    # closest to the STR locus
-    merged_dnms_inf_consistent = measure_consistency(merged_dnms_inf, column="str_parent_of_origin")
+    # print (merged_dnms_inf_consistent.groupby(["trid", "genotype", "str_parent_of_origin"]).size().sort_values())
 
     merged_dnms_inf_consistent.to_csv(args.out, index=False, sep="\t")
 
