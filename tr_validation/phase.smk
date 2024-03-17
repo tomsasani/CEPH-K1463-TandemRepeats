@@ -14,6 +14,9 @@ SAMPLES = ped[ped["paternal_id"] != "missing"]["sample_id"].to_list()
 #SAMPLES = ["2188", "2209", "2189", "2216"]
 #SAMPLES = ["2209"]
 #SAMPLES = ["2189"]
+#SAMPLES = ["200081", ""]
+
+HIPHASE_PREF = "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/TRGT/from_aws/GRCh38_v1.0_50bp_merge/493ef25/hiphase/"
 
 rule all:
     input: 
@@ -43,15 +46,47 @@ rule catalog_inf_sites:
                                  --mom_id {params.mom_id}
         """
 
+rule combine_trio_vcfs:
+    input: 
+    params:
+        kid_phased_snp_vcf = lambda wildcards: HIPHASE_PREF + SMP2ALT[wildcards.SAMPLE] + ".GRCh38.deepvariant.glnexus.phased.vcf.gz",
+        dad_phased_snp_vcf = lambda wildcards: HIPHASE_PREF + SMP2ALT[SMP2DAD[wildcards.SAMPLE]] + ".GRCh38.deepvariant.glnexus.phased.vcf.gz",
+        mom_phased_snp_vcf = lambda wildcards: HIPHASE_PREF + SMP2ALT[SMP2MOM[wildcards.SAMPLE]] + ".GRCh38.deepvariant.glnexus.phased.vcf.gz",
+    output:
+        "tr_validation/data/vcf/{SAMPLE}.trio.vcf.gz"
+    threads: 4
+    shell:
+        """
+        bcftools merge {params.kid_phased_snp_vcf} \
+                       {params.dad_phased_snp_vcf} \
+                       {params.mom_phased_snp_vcf} \
+                       --threads 4 \
+                       | \
+        bcftools view -m2 -M2 \
+                       --include 'INFO/AN == 6' \
+                       -o {output} \
+                       -Oz \
+        """
+
+rule index_trio_vcf:
+    input: "tr_validation/data/vcf/{SAMPLE}.trio.vcf.gz"
+    output: "tr_validation/data/vcf/{SAMPLE}.trio.vcf.gz.csi"
+
+    shell:
+        """
+        bcftools index {input}
+        """
 
 rule annotate_with_informative_sites:
     input:
-        phased_snp_vcf = "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/deepvariant/CEPH-1463.joint.GRCh38.deepvariant.glnexus.phased.vcf.gz",
+        phased_snp_vcf = "tr_validation/data/vcf/{SAMPLE}.trio.vcf.gz",
+        #phased_snp_vcf = "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/deepvariant/CEPH-1463.joint.GRCh38.deepvariant.glnexus.phased.vcf.gz",
+        phased_snp_vcf_idx = "tr_validation/data/vcf/{SAMPLE}.trio.vcf.gz.csi",
         py_script = "tr_validation/annotate_with_informative_sites.py",
     output:
         out = "tr_validation/csv/phased/{SAMPLE}.annotated.2gen.tsv"
     params:
-        kid_phased_str_vcf = lambda wildcards: "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/TRGT/from_aws/GRCh38_v1.0_50bp_merge/493ef25/hiphase/" + wildcards.SAMPLE + "_" + SMP2SUFF[wildcards.SAMPLE] + "_GRCh38_50bp_merge.sorted.phased.vcf.gz",
+        kid_phased_str_vcf = lambda wildcards: HIPHASE_PREF + wildcards.SAMPLE + "_" + SMP2SUFF[wildcards.SAMPLE] + "_GRCh38_50bp_merge.sorted.phased.vcf.gz",
         kid_mutation_df = lambda wildcards: "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/TRGT/from_aws/GRCh38_v1.0_50bp_merge/493ef25/trgt-denovo/" + wildcards.SAMPLE + "_" + SMP2SUFF[wildcards.SAMPLE] + "_GRCh38_50bp_merge_trgtdn.csv.gz",
         dad_id = lambda wildcards: SMP2ALT[SMP2DAD[wildcards.SAMPLE]],
         mom_id = lambda wildcards: SMP2ALT[SMP2MOM[wildcards.SAMPLE]],

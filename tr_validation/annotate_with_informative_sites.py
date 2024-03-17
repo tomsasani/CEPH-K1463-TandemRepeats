@@ -11,23 +11,125 @@ import numpy as np
 import argparse
 from utils import filter_mutation_dataframe
 from collect_informative_sites import catalog_informative_sites
-from typing import List
+from typing import List, Dict
+import cyvcf2
+
+
+def var_pass(v: cyvcf2.Variant, idxs: np.ndarray):
+
+    GT2ALT_AB = {0: (0., 0.), 1: (0.2, 0.8), 2: (1., 1.)}
+
+    if v.var_type != "snp": return False
+    if np.any(v.gt_quals[idxs] < 20): return False
+    if len(v.ALT) > 1: return False
+    rd, ad = v.gt_ref_depths, v.gt_alt_depths
+    td = ad + rd
+    ab = ad / td
+    if np.any(td[idxs] < 10): return False
+
+    gts = v.gt_types
+    if np.any(gts[idxs] == 3): return False
+    for idx in idxs:
+        min_ab, max_ab = GT2ALT_AB[gts[idx]]
+        if not (min_ab <= ab[idx] <= max_ab): 
+            return False
+
+    return True
+
+def catalog_informative_sites(
+    vcf: VCF,
+    region: str,
+    dad: str,
+    mom: str,
+    child: str,
+    smp2idx: Dict[str, int],
+):
+
+    dad_idx, mom_idx = smp2idx[dad], smp2idx[mom]
+    kid_idx = smp2idx[child]
+
+    res = []
+    for v in vcf(region):
+        # make sure variant passes basic filters
+        if not var_pass(
+            v,
+            np.array([dad_idx, mom_idx, kid_idx]),
+        ):
+            continue
+
+        # access unphased genotypes in kid, mom, and dad
+        gts = v.gt_types
+        dad_gt, mom_gt, kid_gt = (
+            gts[dad_idx],
+            gts[mom_idx],
+            gts[kid_idx],
+        )
+
+        # make sure parents don't have the same genotype,
+        # and make sure kid is HET.
+        if dad_gt == mom_gt: continue
+        if kid_gt != 1: continue
+
+        # access phase block PS tags. for a given sample, if two
+        # variants in two different VCFs share a PS tag, their phases
+        # can be inferred to be the same. e.g., a 0|1 SNP and 0|1 STR
+        # both have the non-reference allele on haplotype B.
+        ps_tags = v.format("PS")
+        if ps_tags is None: continue
+        ps_tags = ps_tags[:, 0]
+
+        kid_ps = ps_tags[kid_idx]
+
+        phased_genotypes = v.genotypes
+
+        kid_hap_0, kid_hap_1, kid_phased = phased_genotypes[kid_idx]
+        if not kid_phased: continue
+
+        hap_0_origin, hap_1_origin = None, None
+        # if the kid is het, whichever parent has more
+        # alt alleles is the one that donated the ALT.
+        # even if one parent is UNK, we can assume they donated
+        # the REF allele.
+        if dad_gt > mom_gt:
+            hap_0_origin = "dad" if kid_hap_0 == 1 else "mom"
+            hap_1_origin = "dad" if kid_hap_1 == 1 else "mom"
+        elif mom_gt > dad_gt:
+            hap_0_origin = "mom" if kid_hap_0 == 1 else "dad"
+            hap_1_origin = "mom" if kid_hap_1 == 1 else "dad"
+
+        dad_haplotype_origin, mom_haplotype_origin = "?", "?"
+
+        out_dict = {
+            "inf_chrom": v.CHROM,
+            "inf_pos": v.POS,
+            "dad_inf_gt": str(dad_gt), #"|".join((str(dad_hap_0), str(dad_hap_1))) if dad_phased else "/".join((str(dad_hap_0), str(dad_hap_1))),
+            "mom_inf_gt": str(mom_gt),#"|".join((str(mom_hap_0), str(mom_hap_1))) if mom_phased else "/".join((str(mom_hap_0), str(mom_hap_1))),
+            "kid_inf_gt": "|".join((str(kid_hap_0), str(kid_hap_1))),
+            "kid_inf_ps": kid_ps,
+            "haplotype_A_origin": hap_0_origin,
+            "haplotype_B_origin": hap_1_origin,
+            "dad_haplotype_origin": dad_haplotype_origin,
+            "mom_haplotype_origin": mom_haplotype_origin,
+        }
+        res.append(out_dict)
+
+    return pd.DataFrame(res)
 
 def measure_consistency(df: pd.DataFrame, columns: List[str]):
 
     res = []
     for (trid, genotype), trid_df in df.groupby(["trid", "genotype"]):
         # sort the informative sites by absolute distance to the STR
-        trid_df_sorted = trid_df.sort_values("abs_diff_to_str", ascending=True).reset_index(drop=True)
+        trid_df_sorted = trid_df.sort_values(
+            "abs_diff_to_str",
+            ascending=True,
+        ).reset_index(drop=True)
 
         sorted_values = trid_df[columns].values
 
         # figure out how many sites are consistent closest to the STR. we can do this
         # simply by figuring out the first index where they are *inconsistent.*
         inconsistent_phases = np.where(sorted_values[1:] != sorted_values[:-1])[0]
-
-        # print (sorted_values)
-        # print (sorted_values[1:] == sorted_values[:-1])
 
         # if none are inconsistent, all are consistent!
         if inconsistent_phases.shape[0] == 0:
@@ -47,17 +149,18 @@ def main(args):
 
     print (args.focal, args.dad_id, args.mom_id)
 
-    SLOP = 10_000
+    SLOP = 100_000
 
     SMP2IDX = dict(zip(SNP_VCF.samples, range(len(SNP_VCF.samples))))
 
     CHROMS = [f"chr{c}" for c in range(1, 23)]
 
     mutations = pd.read_csv(args.mutations, sep="\t")
+    print (args.focal, len(mutations.columns), mutations.columns[np.array([13,15,23,25,26])])
     mutations = filter_mutation_dataframe(
         mutations,
         remove_complex=False,
-        remove_duplicates=True,
+        remove_duplicates=False,
     )
     print (f"Total of {mutations.shape[0]} DNMs")
 
@@ -76,13 +179,12 @@ def main(args):
             trid_chrom, trid_start, trid_end, _ = trid.split("_")
             trid_start, trid_end = int(trid_start) - 1, int(trid_end)
         except ValueError:
-            dnm_phases.append(row_dict)
+            # dnm_phases.append(row_dict)
             continue
-
 
         if trid_chrom not in CHROMS:
             NON_AUTOSOMAL += 1
-            dnm_phases.append(row_dict)
+            # dnm_phases.append(row_dict)
             continue
 
         phase_start, phase_end = trid_start - SLOP, trid_end + SLOP
@@ -100,7 +202,7 @@ def main(args):
                 SMP2IDX,
             )
         if informative_phases.shape[0] == 0: 
-            dnm_phases.append(row_dict)
+            # dnm_phases.append(row_dict)
             continue
 
         # add information about the region in which we searched for informative
@@ -131,7 +233,7 @@ def main(args):
                 continue
             if not is_phased: 
                 NOT_PHASED += 1
-                dnm_phases.append(row_dict)
+                # dnm_phases.append(row_dict)
                 continue
 
             # concatenate the alleles at this locus
@@ -206,8 +308,6 @@ def main(args):
         lambda row: row["haplotype_{}_origin".format(row["denovo_hap_id"])],
         axis=1,
     )
-
-    
 
     merged_dnms_inf_consistent["sample_id"] = args.focal
 
