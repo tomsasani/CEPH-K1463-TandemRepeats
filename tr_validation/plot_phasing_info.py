@@ -3,9 +3,10 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
 import cyvcf2
-from typing import Dict
-
-from build_roc_curve_dnms import get_dp
+from typing import Dict, List
+from utils import filter_mutation_dataframe
+import glob
+from build_roc_curve_dnms import get_dp, annotate_with_allr, check_for_overlap
 
 def get_motif(row: pd.Series, smp2vcf: Dict[str, str]):
     trid = row["trid"]
@@ -22,17 +23,35 @@ def get_motif(row: pd.Series, smp2vcf: Dict[str, str]):
         motif = v.INFO.get("MOTIFS")
     return motif
 
-GEN = "3gen"
+GEN = "2gen"
 
+# loop over phased mutation dataframes
 df = pd.read_csv(
-    f"tr_validation/csv/combined.phased.{GEN}.csv",
+    "tr_validation/csv/phased/combined/phased.2gen.tsv",
+    sep="\t",
     dtype={"sample_id": str},
 )
 
+trid_counts = df.groupby("trid").size().to_dict()
+duplicate_trids = [k for k,v in trid_counts.items() if v > 1]
+duplicates = df[df["trid"].isin(duplicate_trids)]
+
+print (duplicates[duplicates["sample_id"] == "200082"])
+
+df = filter_mutation_dataframe(
+        df,
+        remove_complex=False,
+        remove_duplicates=True,
+        mc_column="child_MC"
+    )
+
+
+MIN_INF_SITES = 1
+
 if GEN == "2gen":
-    df = df[(df["n_consistent_upstream"] >= 1) & (df["n_consistent_downstream"] >= 1)]
+    df = df[(df["n_upstream"] >= MIN_INF_SITES) | (df["n_downstream"] >= MIN_INF_SITES)]
 else:
-    df = df[(df["most_common_freq"] >= 0.8)]
+    df = df[(df["most_common_freq"] >= 0.8) & (df["candidate_postzygotic"] == "N")]
 
 df["mom_dp"] = df["per_allele_reads_mother"].apply(
         lambda a: get_dp(a)
@@ -40,80 +59,71 @@ df["mom_dp"] = df["per_allele_reads_mother"].apply(
 df["dad_dp"] = df["per_allele_reads_father"].apply(
         lambda a: get_dp(a)
     )
+df["maternal_dp_ratio"] = df["mom_dp"] / df["dad_dp"]
+
+df["father_overlap_coverage"] = df["father_overlap_coverage"].apply(lambda f: get_dp(f))
+df["mother_overlap_coverage"] = df["mother_overlap_coverage"].apply(lambda f: get_dp(f))
+
+df["dad_min_support"] = df["per_allele_reads_father"].apply(lambda a: min(list(map(int, a.split(",")))))
+df["mom_min_support"] = df["per_allele_reads_mother"].apply(lambda a: min(list(map(int, a.split(",")))))
 
 ped = pd.read_csv(
     "tr_validation/data/file_mapping.csv",
     dtype={"sample_id": str},
 )
-smp2vcf = dict(zip(ped["sample_id"], ped["vcf_fh"]))
 
-df = df.query("denovo_coverage >= 2 and \
-              child_ratio >= 0.1 and \
-              child_coverage >= 10 and \
-              mom_dp >= 10 and \
-              dad_dp >= 10")
+MIN_ALLELE_COVERAGE = 1
+MIN_DENOVO_COVERAGE = 2
+MIN_ALLELE_RATIO = 0.
+MIN_CHILD_RATIO = 0.
+MAX_CHILD_RATIO = 1
+MIN_PARENT_SUPPORT = 10
+
+df = df.query(f"allele_coverage >= {MIN_ALLELE_COVERAGE} and \
+              denovo_coverage >= {MIN_DENOVO_COVERAGE} and \
+              allele_ratio >= {MIN_ALLELE_RATIO} and \
+              child_ratio >= {MIN_CHILD_RATIO} and \
+              child_ratio <= {MAX_CHILD_RATIO} and \
+              father_dropout == 'N' and \
+              mother_dropout == 'N' and \
+              dad_min_support >= {MIN_PARENT_SUPPORT} and \
+              mom_min_support >= {MIN_PARENT_SUPPORT}")
 
 print (df.groupby("sample_id").size())
 
-# df["motif"] = df.apply(lambda row: get_motif(row, smp2vcf), axis=1)
-# df["is_homopolymer"] = df["motif"].apply(lambda m: len(m) == 1)
+df["true_phase"] = df["phase_summary"].apply(lambda p: p.split(":")[0])
+df["support"] = df["phase_summary"].apply(lambda p: int(p.split(":")[1]))
 
-phase_counts = df.groupby(["sample_id", "true_phase"]).size().reset_index().rename(columns={0: "count"})
+print (df[df["sample_id"] == "200101"].head()[["trid", "genotype", "phase_summary", "non_denovo_al_diff", "denovo_al_diff"]])
+
+df["generation"] = df["sample_id"].apply(lambda s: "G4" if str(s).startswith("200") else "G2" if s in ("2209", "2188") else "G3")
+
+g = sns.FacetGrid(data=df, row="generation", sharex=False, sharey=False, aspect=3)
+g.map(sns.boxplot, "sample_id", "support", "true_phase", dodge=True)
+g.add_legend()
+g.savefig("support.png")
+
+COLS = ["sample_id", "true_phase"]
+
+phase_counts = df.groupby(COLS).size().reset_index().rename(columns={0: "count"})
 totals = phase_counts.groupby("sample_id").agg({"count": "sum"}).reset_index().rename(columns={"count": "total"})
 
-phase_counts = phase_counts.merge(totals, on="sample_id")
-
+phase_counts = phase_counts.merge(totals)
 phase_counts["fraction"] = phase_counts["count"] / phase_counts["total"]
 
 ages = pd.read_csv("K20 parental age at birth.csv", dtype={"sample_id": str, "UGRP Lab ID (archive)": str})
-phase_counts = phase_counts.merge(ages, left_on="sample_id", right_on="UGRP Lab ID (archive)")
-
-phase_counts["annotation"] = phase_counts["fraction"].apply(lambda f: round(f, 2))
-phase_counts = phase_counts.astype({"sample_id": "str"})
-
 phase_counts["generation"] = phase_counts["sample_id"].apply(lambda s: "G4" if str(s).startswith("200") else "G2" if s in ("2209", "2188") else "G3")
 
-phase_counts = phase_counts[phase_counts["generation"].isin(["G2", "G3"])]
+f, axarr = plt.subplots(len(phase_counts["generation"].unique()), figsize=(10, 8), sharey=False)
 
-grp_order = phase_counts.sort_values("total", ascending=True)["sample_id"]
-annot = phase_counts[phase_counts["true_phase"] == "dad"].sort_values("total")["annotation"].to_list()
-val = phase_counts[phase_counts["true_phase"] == "dad"].sort_values("total")["count"].to_list()
-
-f, axarr = plt.subplots(2, figsize=(10, 8), sharey=True)
-for i, (gen, gen_df) in enumerate(phase_counts.groupby("generation")):
-    grp_order = gen_df.sort_values("PaAge", ascending=True)["sample_id"]
-    sns.barplot(
-        data=gen_df,
-        x="sample_id",
-        y="count",
-        hue="true_phase",
-        ec="k",
-        lw=1,
-        order=grp_order,
-        ax=axarr[i],
+g = sns.FacetGrid(data=phase_counts, row="generation", sharex=False, sharey=False, aspect=3)
+g.map(sns.barplot,
+        "sample_id",
+        "count",
+        "true_phase",
     )
-    sns.despine(ax=axarr[i], top=True, right=True)
-    if i > 0: axarr[i].legend_.remove()
-    axarr[i].set_title(gen)
 
-# for idx, (text, y) in enumerate(zip(annot, val)):
-#     ax.annotate(f"{int(text * 100)}%", (idx, y * 1.1))
-# ax.set_xlabel("Sample ID")
-# ax.set_ylabel("DNM count")
-# ax.set_title("DNM phasing in G3 (using HiPhase approach)")
-# ax.legend(frameon=False, title="Inferred parent-of-origin")
-# sns.despine(ax=ax, top=True, right=True)
-f.tight_layout()
-f.savefig(f"phase.{GEN}.png", dpi=200)
-
-
-# new = phase_counts[["sample_id", "true_phase", "MaAge", "PaAge", "count"]].melt(id_vars=["sample_id", "true_phase", "count"])
-# phase_counts = phase_counts[phase_counts["sample_id"].isin([2216, 2211, 2212, 2298, 2215, 2217, 2189, 2187])]
-# print (phase_counts)
-
-f, ax = plt.subplots()
-ax.scatter(phase_counts[phase_counts["true_phase"] == "mom"]["MaAge"], phase_counts[phase_counts["true_phase"] == "mom"]["count"], label="paternal")
-ax.scatter(phase_counts[phase_counts["true_phase"] == "dad"]["PaAge"], phase_counts[phase_counts["true_phase"] == "dad"]["count"], label="maternal")
-ax.legend()
-f.tight_layout()
-f.savefig("o.png", dpi=200)
+g.figure.suptitle("Counts of phased DNMs (using HiPhase approach)")
+g.add_legend()
+g.tight_layout()
+g.savefig(f"phase.{GEN}.png", dpi=200)

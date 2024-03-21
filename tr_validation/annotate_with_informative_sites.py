@@ -16,17 +16,32 @@ import cyvcf2
 
 
 def var_pass(v: cyvcf2.Variant, idxs: np.ndarray):
+    """method to ensure that informative
+    variants meet basic filtering criteria.
 
-    GT2ALT_AB = {0: (0., 0.), 1: (0.2, 0.8), 2: (1., 1.)}
+    Args:
+        v (cyvcf2.Variant): _description_
+        idxs (np.ndarray): _description_
+
+    Returns:
+        _type_: _description_
+    """
+
+    # map genotypes to expected allele balance range
+    GT2ALT_AB = {0: (0., 0.), 1: (0.2, 0.8), 2: (0.95, 1.)}
 
     if v.var_type != "snp": return False
+    # if the PF tag is set to TR_OVERLAP, then the SNV
+    # overlaps a TR and shouldn't be used
+    # if v.format("PF") is not None:
+    #     if "TR_OVERLAP" in v.format("PF"): return False
     if np.any(v.gt_quals[idxs] < 20): return False
     if len(v.ALT) > 1: return False
     rd, ad = v.gt_ref_depths, v.gt_alt_depths
     td = ad + rd
-    ab = ad / td
     if np.any(td[idxs] < 10): return False
 
+    ab = ad / td
     gts = v.gt_types
     if np.any(gts[idxs] == 3): return False
     for idx in idxs:
@@ -37,6 +52,7 @@ def var_pass(v: cyvcf2.Variant, idxs: np.ndarray):
     return True
 
 def catalog_informative_sites(
+    *,
     vcf: VCF,
     region: str,
     dad: str,
@@ -47,6 +63,9 @@ def catalog_informative_sites(
 
     dad_idx, mom_idx = smp2idx[dad], smp2idx[mom]
     kid_idx = smp2idx[child]
+
+    if child == "200081":
+        assert dad == "200080" and mom == "NA12879"
 
     res = []
     for v in vcf(region):
@@ -65,6 +84,10 @@ def catalog_informative_sites(
             gts[kid_idx],
         )
 
+        ad, rd = v.gt_alt_depths, v.gt_ref_depths
+        td = ad + rd
+        ab = ad / td
+
         # make sure parents don't have the same genotype,
         # and make sure kid is HET.
         if dad_gt == mom_gt: continue
@@ -78,8 +101,14 @@ def catalog_informative_sites(
         if ps_tags is None: continue
         ps_tags = ps_tags[:, 0]
 
-        kid_ps = ps_tags[kid_idx]
+        assert ps_tags.shape[0] == len(smp2idx)
 
+        # get kid's PS tag 
+        kid_ps = ps_tags[kid_idx]
+        # get phased genotype information. a bit redundant,
+        # since we already grabbed unphased genotypes, but 
+        # necessary to figure out which haplotype the
+        # alleles are on in the child.
         phased_genotypes = v.genotypes
 
         kid_hap_0, kid_hap_1, kid_phased = phased_genotypes[kid_idx]
@@ -106,6 +135,9 @@ def catalog_informative_sites(
             "mom_inf_gt": str(mom_gt),#"|".join((str(mom_hap_0), str(mom_hap_1))) if mom_phased else "/".join((str(mom_hap_0), str(mom_hap_1))),
             "kid_inf_gt": "|".join((str(kid_hap_0), str(kid_hap_1))),
             "kid_inf_ps": kid_ps,
+            "dad_dp": td[dad_idx],
+            "mom_dp": td[mom_idx],
+            "kid_dp": td[kid_idx],
             "haplotype_A_origin": hap_0_origin,
             "haplotype_B_origin": hap_1_origin,
             "dad_haplotype_origin": dad_haplotype_origin,
@@ -118,7 +150,7 @@ def catalog_informative_sites(
 def measure_consistency(df: pd.DataFrame, columns: List[str]):
 
     res = []
-    for (trid, genotype), trid_df in df.groupby(["trid", "genotype"]):
+    for _, trid_df in df.groupby(["trid", "genotype"]):
         # sort the informative sites by absolute distance to the STR
         trid_df_sorted = trid_df.sort_values(
             "abs_diff_to_str",
@@ -142,6 +174,7 @@ def measure_consistency(df: pd.DataFrame, columns: List[str]):
 
     return pd.concat(res, ignore_index=True)
 
+
 def main(args):
 
     KID_STR_VCF = VCF(args.str_vcf, gts012=True)
@@ -156,11 +189,11 @@ def main(args):
     CHROMS = [f"chr{c}" for c in range(1, 23)]
 
     mutations = pd.read_csv(args.mutations, sep="\t")
-    print (args.focal, len(mutations.columns), mutations.columns[np.array([13,15,23,25,26])])
     mutations = filter_mutation_dataframe(
         mutations,
-        remove_complex=False,
-        remove_duplicates=False,
+        remove_complex=True,
+        remove_duplicates=True,
+        mc_column="child_MC"
     )
     print (f"Total of {mutations.shape[0]} DNMs")
 
@@ -168,9 +201,9 @@ def main(args):
 
     WRONG_TRID, NOT_PHASED, NON_AUTOSOMAL = 0, 0, 0
 
-    informative_sites = []
+    informative_sites: List[pd.DataFrame] = []
 
-    # loop over mutations in the dataframe
+    # loop over STR de novos in the dataframe
     for _, row in tqdm.tqdm(mutations.iterrows()):
         row_dict = row.to_dict()
         # extract chrom, start and end
@@ -182,9 +215,9 @@ def main(args):
             # dnm_phases.append(row_dict)
             continue
 
+        # make sure we're looking at an autosome for now
         if trid_chrom not in CHROMS:
-            NON_AUTOSOMAL += 1
-            # dnm_phases.append(row_dict)
+            dnm_phases.append(row_dict)
             continue
 
         phase_start, phase_end = trid_start - SLOP, trid_end + SLOP
@@ -194,23 +227,20 @@ def main(args):
         # STR. we record the PS (phase block) tag in the mom, dad, and child
         # at every informative site.
         informative_phases = catalog_informative_sites(
-                SNP_VCF,
-                f"{trid_chrom}:{phase_start}-{phase_end}",
-                args.dad_id,
-                args.mom_id,
-                args.focal_alt,
-                SMP2IDX,
+                vcf=SNP_VCF,
+                region=f"{trid_chrom}:{phase_start}-{phase_end}",
+                dad=args.dad_id,
+                mom=args.mom_id,
+                child=args.focal_alt,
+                smp2idx=SMP2IDX,
             )
         if informative_phases.shape[0] == 0: 
-            # dnm_phases.append(row_dict)
+            dnm_phases.append(row_dict)
             continue
 
         # add information about the region in which we searched for informative
         # sites to the output dataframe.
         informative_phases["trid"] = trid
-        # informative_phases["phase_chrom"] = phase_chrom
-        # informative_phases["phase_start"] = phase_start
-        # informative_phases["phase_end"] = phase_end
         informative_sites.append(informative_phases)
 
         denovo_gt = row["genotype"]
@@ -233,7 +263,7 @@ def main(args):
                 continue
             if not is_phased: 
                 NOT_PHASED += 1
-                # dnm_phases.append(row_dict)
+                dnm_phases.append(row_dict)
                 continue
 
             # concatenate the alleles at this locus
@@ -251,8 +281,13 @@ def main(args):
             else:
                 continue
 
+            denovo_al_diff = denovo_al - len(var.REF)
+            non_denovo_al_diff = orig_al - len(var.REF)
+
             # access PS tag for child at the STR locus
-            kid_ps = var.format("PS")[:, 0][0]
+            ps_tags = var.format("PS")[:, 0]
+            assert ps_tags.shape[0] == 1
+            kid_ps = ps_tags[0]
 
             row_dict = row.to_dict()
             row_dict.update(
@@ -260,18 +295,19 @@ def main(args):
                     "denovo_hap_id": denovo_hap_id,
                     "motif": motif,
                     "str_chrom": trid_chrom,
-                    # "phase_start": phase_start,
-                    # "phase_end": phase_end,
                     "denovo_al": denovo_al,
                     "non_denovo_al": orig_al,
+                    "denovo_al_diff": denovo_al_diff,
+                    "non_denovo_al_diff": non_denovo_al_diff,
                     "kid_str_ps": kid_ps,
                     "kid_str_gt": "|".join((str(hap_a), str(hap_b))),
+                    "kid_str_hap_a": hap_a,
+                    "kid_str_hap_b": hap_b,
                 }
             )
             dnm_phases.append(row_dict)
 
-    informative_sites = pd.concat(informative_sites)
-
+    informative_sites = pd.concat(informative_sites).drop_duplicates()
 
     dnm_phases = pd.DataFrame(dnm_phases)
 
@@ -281,11 +317,9 @@ def main(args):
     # genotypes at informative sites to infer phases at STRs.
     merged_dnms_inf = dnm_phases.merge(
         informative_sites,
-        # left_on=["trid", "phase_chrom", "phase_start", "phase_end", "kid_str_ps"],
-        # right_on=["trid", "phase_chrom", "phase_start", "phase_end", "kid_inf_ps"],
         left_on=["trid", "str_chrom", "kid_str_ps"],
         right_on=["trid", "inf_chrom", "kid_inf_ps"],
-        #how="left",
+        how="left",
     )
 
 

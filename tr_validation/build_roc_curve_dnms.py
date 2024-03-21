@@ -3,103 +3,54 @@ import seaborn as sns
 import pandas as pd
 import argparse
 import numpy as np
-from typing import Callable
+from typing import Callable, List
 import numba
 from schema import DeNovoSchema
 import cyvcf2
 from collections import Counter
+import glob
 
 
-from plot_read_support import classify_motif, calculate_min_dist
-from utils import get_read_diff
-from assess_concordance import als_in_stdev
+from utils import filter_mutation_dataframe
+from assess_concordance import assign_allele
 
 from sklearn.metrics import roc_curve, roc_auc_score
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 
-plt.rc("font", size=10)
+plt.rc("font", size=12)
 
 
-def calculate_expected_diffs(
-    vcf: cyvcf2.VCF,
+def annotate_with_allr(
     row: pd.Series,
+    mom_vcf: cyvcf2.VCF,
+    dad_vcf: cyvcf2.VCF,
 ):
-    exp_diff_ref, exp_diff_alt = 0, 0
+    trid = row["trid"]
+    chrom, start, end, _ = trid.split("_")
+    region = f"{chrom}:{start}-{end}"
 
-    try:
-        ref_al, alt_al = list(map(int, row["child_motif_counts"].split(",")))
-    except ValueError:
-        return ",".join(list(map(str, [exp_diff_ref, exp_diff_alt])))
+    dad_allr, mom_allr = "?", "?"
+    for v in mom_vcf(region):
+        if v.INFO.get("TRID") != trid: continue
+        mom_allr = v.format("ALLR")[0]
+    for v in dad_vcf(region):
+        if v.INFO.get("TRID") != trid: continue
+        dad_allr = v.format("ALLR")[0]
+    return ";".join([dad_allr, mom_allr])
 
-    for var in vcf(row["region"]):
-        var_trid = var.INFO.get("TRID")
-        if row["trid"] != var_trid:
-            continue
-        # get information about a variant from a VCF
-        exp_diff_alt = alt_al - len(var.REF)
-        exp_diff_ref = ref_al - len(var.REF)
+def check_for_overlap(row: pd.Series):
 
-    return ",".join(list(map(str, [exp_diff_ref, exp_diff_alt])))
+    allr = row["allr"]
+    denovo_al = row["denovo_al"]
+    
 
-
-def trid_to_motif(
-    vcf: cyvcf2.VCF,
-    row: pd.Series,
-):
-    motif = "N"
-    for var in vcf(row["region"]):
-        var_trid = var.INFO.get("TRID")
-        if row["trid"] != var_trid:
-            continue
-        # get information about a variant from a VCF
-        motif = var.INFO.get("MOTIFS")
-
-    return motif
-
-
-def trid_to_region(t):
-    try:
-        chrom, start, end, method = t.split("_")
-        start, end = int(start) - 1, int(end)
-        return f"{chrom}:{start}-{end}"
-    except ValueError:
-        return "UNK"
-
-
-def format_validation_df(df, tech: str = "element"):
-    df = df[df["sample"] == "kid"]
-    df_totals = (
-        df.groupby("region")
-        .agg({"Read support": "sum"})
-        .reset_index()
-        .rename(columns={"Read support": f"total_{tech}_reads"})
-    )
-    df = df.merge(df_totals, on="region")
-
-    df["Motif type"] = df["motif"].apply(lambda m: classify_motif(m))
-
-    # for each read, calculate the minimum distance to either the REF or ALT allele
-    # (i.e., the "closest" allele)
-    df["is_ref"] = df.apply(lambda row: calculate_min_dist(row), axis=1)
-    df["Expected allele length"] = df.apply(
-        lambda row: row["exp_allele_diff_ref"]
-        if row["is_ref"] == "REF"
-        else row["exp_allele_diff_alt"],
-        axis=1,
-    )
-    df[f"{tech}_error"] = df["diff"] - df["Expected allele length"]
-    df[f"frac_{tech}_reads"] = df["Read support"] / df[f"total_{tech}_reads"]
-    return df
-
-
-def get_ab(par: str):
-    per_allele_reads = list(map(int, par.split(",")))
-    if len(per_allele_reads) == 1:
-        return 1
-    else:
-        return per_allele_reads[-1] / sum(per_allele_reads)
-
+    is_overlap = False
+    for parent in allr.split(";"):
+        for allele_range in parent.split(","):
+            a1, a2 = list(map(int, allele_range.split("-")))
+            if a1 <= int(denovo_al) <= a2: is_overlap = True
+    return int(is_overlap)
 
 def get_dp(par: str):
     per_allele_reads = list(map(int, par.split(",")))
@@ -107,127 +58,192 @@ def get_dp(par: str):
 
 
 def main():
-    # read in raw DNM file
-    mutations = pd.read_csv(
-        "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/TRGT/from_aws/GRCh38_v1.0_50bp_merge/493ef25/trgt-denovo/2189_SF_GRCh38_50bp_merge_trgtdn.T95.csv.gz",
-        sep="\t",
+    # read in raw DNM files
+    STR_VCF_PREF = "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/TRGT/from_aws/GRCh38_v1.0_50bp_merge/493ef25/hiphase"
+
+    MIN_DN_COVERAGE = 1
+    MIN_TOTAL_COVERAGE = 1
+
+    mutations: List[pd.DataFrame] = []
+
+    ped = pd.read_csv(
+        "tr_validation/data/file_mapping.csv",
+        dtype={"paternal_id": str, "maternal_id": str, "sample_id": str},
     )
+    SMP2SUFF = dict(zip(ped["sample_id"].to_list(), ped["suffix"].to_list()))
+    SMP2DAD = dict(zip(ped["sample_id"].to_list(), ped["paternal_id"].to_list()))
+    SMP2MOM = dict(zip(ped["sample_id"].to_list(), ped["maternal_id"].to_list()))
 
-    KID_STR_VCF = cyvcf2.VCF(
-        "/scratch/ucgd/lustre-work/quinlan/u1006375/CEPH-K1463-TandemRepeats/tr_validation/data/hiphase/2189_SF_GRCh38_50bp_merge.sorted.phased.vcf.gz",
-        gts012=True,
-    )
 
-    # sample_ids = ["2189"]
-    # # filter to the samples of interest
-    # mutations = mutations[mutations["sample_id"].isin(sample_ids)]
+    G4a = ["200081", "200082", "200084", "200085", "200086", "200087"]
+    G4b = ["200101", "200102", "200103", "200104", "200105", "200106"]
+    G2 = ["2209", "2188"]
 
+    # loop over phased mutation dataframes
+    for i, fh in enumerate(glob.glob("tr_validation/csv/phased/*.phased.2gen.tsv")):
+        sample = fh.split("/")[-1].split(".")[0]
+        #if sample not in G4a + G4b + G2: continue
+
+        mdf = pd.read_csv(
+            fh,
+            sep="\t",
+        )
+        mdf = mdf[mdf["denovo_coverage"] >= MIN_DN_COVERAGE]
+        mdf["phase"] = mdf["phase_summary"].apply(lambda p: p.split(":")[0])
+        mdf["sample_id"] = sample
+
+        # mom, dad = SMP2MOM[sample], SMP2DAD[sample]
+        # mom_vcf = cyvcf2.VCF(
+        #     f"{STR_VCF_PREF}/{mom}_{SMP2SUFF[mom]}_GRCh38_50bp_merge.sorted.phased.vcf.gz",
+        #     gts012=True,
+        # )
+        # dad_vcf = cyvcf2.VCF(
+        #     f"{STR_VCF_PREF}/{dad}_{SMP2SUFF[dad]}_GRCh38_50bp_merge.sorted.phased.vcf.gz",
+        #     gts012=True,
+        # )
+
+        # mdf["allr"] = mdf.apply(lambda row: annotate_with_allr(row, mom_vcf, dad_vcf), axis=1)
+        mutations.append(mdf)
+
+    mutations = pd.concat(mutations)
+    
     # if we're looking at de novos, ensure that we filter
     # the DataFrame to exclude the non-denovo candidates
     # remove denovos where allele size is unchanged
-    mutations = mutations[mutations["denovo_coverage"] >= 1]
-    mutations = mutations[~mutations["trid"].str.contains("X|Y|Un|random", regex=True)]
+    mutations = filter_mutation_dataframe(
+        mutations,
+        remove_complex=True,
+        remove_duplicates=True,
+    )
 
-    print (mutations.shape)
+    print (mutations["allele_ratio"].min())
 
-    # remove pathogenics
-    mutations["region"] = mutations["trid"].apply(lambda t: trid_to_region(t))
-    mutations = mutations[mutations["region"] != "UNK"]
+    mutations["generation"] = mutations["sample_id"].apply(lambda s: 1 if str(s).startswith("200") else 0)
 
+
+    # add columns and filter
     mutations["mom_dp"] = mutations["per_allele_reads_mother"].apply(
         lambda a: get_dp(a)
     )
     mutations["dad_dp"] = mutations["per_allele_reads_father"].apply(
         lambda a: get_dp(a)
     )
+    mutations["maternal_to_paternal_ratio"] = mutations["mom_dp"] / mutations["dad_dp"]
 
-    # merge with read support evidence
-    support = pd.read_csv("tr_validation/csv/2189.element.dnm.read_support.csv")[
-        [
-            "trid",
-            "region",
-            "exp_allele_diff_ref",
-            "exp_allele_diff_alt",
-            "sample",
-            "diff",
-            "Read support",
-        ]
-    ]
+    mutations = mutations[mutations["maternal_to_paternal_ratio"].between(0.75, 1.25)]
 
-    support_totals = (
-        support.groupby("region")
-        .agg({"Read support": "sum"})
-        .reset_index()
-        .rename(columns={"Read support": "Total read support"})
-    )
-    support = support.merge(support_totals, on="region", how="left")
-    # require at least 10 total spanning reads
-    support = support[(support["Total read support"] >= 10) & (support["Total read support"] <= 100)]
-
-    mutations = mutations.merge(support, on=["trid", "region"])
-
-    mutations = mutations[mutations["sample"] == "kid"]
-
-    mutations["exp_diff"] = mutations["exp_allele_diff_ref"] - mutations["exp_allele_diff_alt"]
-    mutations = mutations.query("exp_diff != 0")
-
-    res = []
-
-    for trid, kid_df_trid in mutations.groupby("trid"):
-        is_concordant = als_in_stdev(kid_df_trid)
-        kid_df_trid["is_concordant"] = is_concordant 
-        res.append(kid_df_trid)
-
-    mutations = pd.concat(res)
-
-    print (mutations.columns)
-
-    # remove complex STRs
-    mutations = mutations[~mutations["child_motif_counts"].str.contains("_")]
-    mutations["motif"] = mutations.apply(lambda row: trid_to_motif(KID_STR_VCF, row), axis=1)
+    #mutations["denovo_overlap"] = mutations.apply(lambda row: check_for_overlap(row), axis=1)
     mutations["motif_size"] = mutations["motif"].apply(lambda m: len(m))
 
-    mutations["expansion_size"] = mutations["child_motif_counts"].apply(lambda mc: abs(int(mc.split(",")[1]) - int(mc.split(",")[0])) if len(mc.split(",")) > 1 else np.nan)
-    mutations.dropna(subset=["expansion_size"], inplace=True)
+    mutations["phase"] = mutations["phase_summary"].apply(lambda p: 1 if p.split(":")[0] == "dad" else 0)
+
+    # mutations = mutations[
+    #     (mutations["child_coverage"] >= MIN_TOTAL_COVERAGE)
+    #     & (mutations["mom_dp"] >= MIN_TOTAL_COVERAGE)
+    #     & (mutations["dad_dp"] >= MIN_TOTAL_COVERAGE)
+    # ]
+
+    # print (mutations["allele_ratio"].min())
+
+
+    # combine with element validation data
+    validation_df: List[pd.DataFrame] = []
+    for fh in glob.glob("tr_validation/csv/*.element.dnm.read_support.csv"):
+        df = pd.read_csv(fh)
+        validation_df.append(df)
+
+    if len(validation_df) > 0:
+        validation_df = pd.concat(validation_df)
+
+        mutations = mutations.merge(validation_df)
+
+        GROUP_COLS = [
+            "trid",
+            "sample_id",
+            "genotype",
+            "exp_allele_diff_denovo",
+            "exp_allele_diff_non_denovo",
+        ]
+        mutations = mutations[mutations["sample"] == "kid"]
+        mutation_totals = (
+            mutations.groupby(GROUP_COLS)
+            .agg({"Read support": "sum"})
+            .reset_index()
+            .rename(columns={"Read support": "Total read support"})
+        )
+        mutations = mutations.merge(mutation_totals, on=GROUP_COLS, how="left")
+        mutations["Read support frac"] = mutations["Read support"] / mutations["Total read support"]
+
+        # require at least 10 total spanning reads and at least 2 reads supporting a given diff
+        mutations = mutations[
+            (mutations["Total read support"] >= 10)
+            & (mutations["Total read support"] <= 100)
+        ]
+
+        # for every observed number of net CIGAR operations in a read,
+        # figure out if that net CIGAR is closer to the expected net CIGAR
+        # operation for a REF or ALT allele.
+        mutations["allele_assignment"] = mutations.apply(lambda row: assign_allele(row), axis=1)
+        mutation_total_support = mutations.groupby(["trid", "allele_assignment"]).agg({"Read support": "sum"}).reset_index().rename(columns={"Read support": "Total read support for allele"})
+        mutations = mutations.merge(mutation_total_support, how="left").fillna(value=0)
+
+        res: List[pd.DataFrame] = []
+        for trid, trid_df in mutations.groupby(["trid", "genotype"]):
+            if "denovo" not in trid_df["allele_assignment"].to_list():
+                is_concordant = False
+            else:
+                # assumption is at least 1 read supports the denovo
+                is_concordant = True
+            trid_df["is_concordant"] = is_concordant
+            trid_df = trid_df.drop_duplicates(["trid", "genotype"])
+            res.append(trid_df)
+        mutations = pd.concat(res)
+        
+        #mutations = mutations[mutations["allele_assignment"] == "denovo"]
+
+    mutations["father_overlap_coverage"] = mutations["father_overlap_coverage"].apply(lambda f: get_dp(f))
+    mutations["mother_overlap_coverage"] = mutations["mother_overlap_coverage"].apply(lambda f: get_dp(f))
 
     candidates = mutations["trid"].nunique()
     print(f"{candidates} loci that are candidate DNMs")
 
     # add a transmission column if it's not in there
     # require that the samples have children
-    # mutations["expected_children"] = mutations["sample_id"].apply(lambda s: 6 if s in ("2189", "2216") else 8 if s in ("2209", "2188") else np.nan)
+    # mutations["expected_children"] = mutations["sample_id"].apply(
+    #     lambda s: 6 if s in ("2189", "2216") else 8 if s in ("2209", "2188") else np.nan
+    # )
     # mutations = mutations[mutations["n_children"] == mutations["expected_children"]]
 
     # MIN_TRANSMISSIONS = 1
-    # if "n_with_denovo_allele_strict" in mutations.columns:
-    #     mutations["Is transmitted?"] = mutations["n_with_denovo_allele"].apply(
-    #         lambda n: 1 if n >= MIN_TRANSMISSIONS else 0
-    #     )
-    # else:
-    #     print("No transmission column!")
-    #     mutations["Is transmitted?"] = "unknown"
+
+    # mutations["Is transmitted?"] = mutations["n_with_denovo_allele"].apply(
+    #     lambda n: 1 if n >= MIN_TRANSMISSIONS else 0
+    # )
 
     non_inf = np.where(~np.isinf(mutations["allele_ratio"].values))[0]
     mutations = mutations.iloc[non_inf]
+    print (mutations["allele_ratio"].min())
 
     FEATURES = [
         "child_ratio",
         "allele_ratio",
         "denovo_coverage",
         "allele_coverage",
-        # "child_coverage",
-        # "mom_dp",
-        # "dad_dp",
-        "mean_diff_father",
-        "mean_diff_mother",
-        "father_dropout_prob",
-        "mother_dropout_prob",
-        # "motif_size",
-        "expansion_size",
+        "child_coverage",
+        "mom_dp",
+        "dad_dp",
+        "motif_size",
+        "phase",
+        "denovo_al",
+        # "is_concordant",
+        "phase",
+        
     ]
 
+    CLASSIFICATION = "is_concordant"
+
     X = mutations[FEATURES]
-    y = mutations["is_concordant"].values
+    y = mutations[CLASSIFICATION].values
 
     f, ax = plt.subplots()
     sns.heatmap(X.corr(method="spearman"), cmap="RdBu_r", vmin=-1, vmax=1)
@@ -237,8 +253,10 @@ def main():
     f.tight_layout()
     f.savefig("corr.png", dpi=200)
 
+    X = X.values
+
     X_train, X_test, y_train, y_test = train_test_split(
-        X.values, y, shuffle=True, test_size=0.2
+        X, y, shuffle=True, test_size=0.2
     )
 
     f, axarr = plt.subplots(
@@ -251,7 +269,28 @@ def main():
 
     for fi, feat in enumerate(FEATURES):
         # get feature values for this feature
-        X_feat = X.values[:, fi]
+        X_feat = X[:, fi]
+
+        if feat == "allele_ratio":
+            print (np.min(X_feat))
+
+        # y_clean_idxs = np.where(y)[0]
+        # y_clean = y[y_clean_idxs]
+        # y_clean[y_clean > 1] = 1
+        fpr, tpr, thresholds = roc_curve(y, X_feat)
+        auc = round(roc_auc_score(y, X_feat), 3)
+
+        # youden's j
+        idx = np.argmax(tpr - fpr)
+        if auc < 0.5: idx = np.argmax(fpr - tpr)
+        threshold = thresholds[idx]
+
+        axarr[fi, 1].plot(fpr, tpr, c="firebrick", lw=2)
+        axarr[fi, 1].axline(xy1=(0, 0), slope=1, c="k", ls=":")
+        axarr[fi, 1].set_title(f"ROC curve using {feat} only\n(AUC = {auc}, Youden's J at {threshold})")# for TPR of {round(tpr[idx], 2)} and FPR of {round(fpr[idx], 2)})")
+        axarr[fi, 1].set_xlabel("FPR")
+        axarr[fi, 1].set_ylabel("TPR")
+        sns.despine(ax=axarr[fi, 1], top=True, right=True)
 
         # infs
         # inf_idxs = np.where(np.isinf(X_feat))
@@ -260,7 +299,7 @@ def main():
         # y_prime = y[non_inf_idxs]
 
         bins = np.linspace(np.min(X_feat), np.max(X_feat), num=50)
-        bins = np.arange(np.min(X_feat), np.max(X_feat), step=1 if np.max(X_feat) > 1 else 0.05)
+        # bins = np.arange(np.min(X_feat), np.max(X_feat), step=1 if np.max(X_feat) > 1 else 0.05)
 
         for y_ in np.unique(y):
             y_i = np.where(y == y_)[0]
@@ -270,51 +309,38 @@ def main():
             histfracs = histvals / np.sum(histvals)
             cumsum = np.cumsum(histfracs)
 
-            label = "TP" if y_ == 1 else "TN"
+            #label = "Maternal" if y_ == 0 else "Paternal"
 
             # axarr[fi, 0].plot(
             #     bins[1:],
             #     cumsum,
-            #     label=label,
+            #     label=f"{y_} (n = {y_i.shape[0]})",
             #     lw=2,
+                
             # )
+
             axarr[fi, 0].hist(
                 X_feat_sub,
                 bins=bins,
                 ec="k",
                 lw=1,
-                label=label,
+                label=f"{y_} (n = {y_i.shape[0]})",
                 density=True,
                 alpha=0.25,
             )
 
             axarr[fi, 0].set_xlabel(f"{feat}")
-            axarr[fi, 0].set_ylabel("Number of DNMs")
-            axarr[fi, 0].legend()
+            axarr[fi, 0].set_ylabel("Cumulative fraction of DNMs")
+            axarr[fi, 0].legend(title=CLASSIFICATION)
 
             axarr[fi, 0].set_title(f"Distribution of {feat} values")
 
             sns.despine(ax=axarr[fi, 0], top=True, right=True)
 
-        fpr, tpr, thresholds = roc_curve(y, X_feat)
-        auc = round(roc_auc_score(y, X_feat), 3)
-
-        # youden's j
-        idx = np.argmax(tpr - fpr)
-        if auc < 0.5: idx = np.argmax(fpr - tpr)
-        threshold = thresholds[idx]
-
-        # if feat == "kid AL diff.":
-        # print (feat, thresholds)
-        axarr[fi, 1].plot(fpr, tpr, c="firebrick", lw=2)
-        axarr[fi, 1].axline(xy1=(0, 0), slope=1, c="k", ls=":")
-        axarr[fi, 1].set_title(f"ROC curve using {feat} only\n(AUC = {auc}\nYouden's J at {threshold} for TPR of {round(tpr[idx], 2)} and FPR of {round(fpr[idx], 2)})")
-        axarr[fi, 1].set_xlabel("FPR")
-        axarr[fi, 1].set_ylabel("TPR")
-        sns.despine(ax=axarr[fi, 1], top=True, right=True)
+        # subset to good ones
 
     f.tight_layout()
-    f.savefig("hist.png", dpi=300)
+    f.savefig("G2.hist.png", dpi=300)
 
     clf = RandomForestClassifier(max_depth=2, class_weight="balanced")
     clf.fit(X_train, y_train)
