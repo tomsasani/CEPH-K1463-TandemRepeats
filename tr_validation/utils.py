@@ -10,13 +10,14 @@ def filter_mutation_dataframe(
     remove_complex: bool = True,
     remove_duplicates: bool = True,
     mc_column: str = "child_MC",
+    denovo_coverage_min: int = 1,
 ):
 
-    mutations = mutations[mutations["denovo_coverage"] >= 1]
+    mutations = mutations[mutations["denovo_coverage"] >= denovo_coverage_min]
     # only look at autosomes
     mutations = mutations[~mutations["trid"].str.contains("X|Y|Un|random", regex=True)]
-    # no parental dropout
-    mutations = mutations[(mutations["father_dropout"] == "N") & (mutations["mother_dropout"] == "N")]
+    # remove pathogenics
+    mutations = mutations[~mutations["trid"].str.contains("pathogenic")]
     
     if remove_complex:
         mutations = mutations[~mutations[mc_column].str.contains("_")]
@@ -66,6 +67,10 @@ def count_indel_in_read(
 
     OP2DIFF = {MATCH: 0, INS: 1, DEL: -1}
 
+    # from SAM spec (https://samtools.github.io/hts-specs/SAMv1.pdf)
+    # page 8 -- 1 if the operation consumes reference sequence
+    CONSUMES_REF = dict(zip(range(9), [1, 0, 1, 1, 0, 0, 0, 1, 1]))
+
     # figure out start and end positions of the variant, adding
     # some slop if desired to either side
     var_s, var_e = vs - slop, ve + slop
@@ -76,29 +81,36 @@ def count_indel_in_read(
     cigar_op_total = 0
     cur_pos = rs
     for op, bp in ct:
-        # figure out intersection between current cigar operation span
-        # and the variant locus span. if the operation is an INS, then
-        # the operation will start at s_0 and *technically* end at s_0 + INS_SIZE,
-        # but relative to the reference genome is an operation that starts at
-        # s_0 and ends at s_0 + 1. 
-        if op == INS:
-            op_length = 1
-        elif op in (MATCH, DEL):
-            op_length = bp
-        else: continue
 
-        op_s, op_e = cur_pos, cur_pos + op_length
-        #print (op, bp, op_s, op_e, vs, ve, slop, var_s, var_e)
+        # check if this operation type consumes reference sequence.
+        # if so, we'll keep track of the bp associated with the op.
+        if bool(CONSUMES_REF[op]):
+            op_length = bp
+        else:
+            op_length = 0
+
+        # keep track of the *relative* start and end of the operation,
+        # given the number of consumable base pairs that have been
+        # encountered in the iteration so far.
+        op_s, op_e = cur_pos, cur_pos + max([1, op_length])
+
+        # if this operation overlaps our STR locus, increment our counter
+        # of net CIGAR operations
         overlapping_bp = bp_overlap(op_s, op_e, var_s, var_e)
-        #print (overlapping_bp)
-        # increment cigar ops by the total base pairs of this op
-        if op == INS:
-            cigar_op_total += bp * OP2DIFF[op]
-        elif op in (MATCH, DEL):
-            cigar_op_total += overlapping_bp * OP2DIFF[op]
-        # increment our current position counter 
+
+        if overlapping_bp > 0:
+            if op == INS:
+                # print(
+                #     f"overlap: {overlapping_bp}, operation: {op}, size: {bp}, true_size: {op_length}, true_start: {op_s}, true_end: {op_e}"
+                # )
+                cigar_op_total += (bp * OP2DIFF[op])
+            elif op in (MATCH, DEL):
+                cigar_op_total += (overlapping_bp * OP2DIFF[op])
+        # increment our current position counter regardless of whether the
+        # operation overlaps our STR locus of interest
+
         cur_pos += op_length
-    #print (cigar_op_total)
+
     return cigar_op_total
 
 
@@ -141,10 +153,7 @@ def get_read_diff(
 
     # query the CIGAR string in the read.
     ct = read.cigartuples
-    #print (ct)
-
     diff = count_indel_in_read(ct, qs, start, end, slop=slop)
-    #print ("TOTAL DIFF", diff)
     return diff
 
 
