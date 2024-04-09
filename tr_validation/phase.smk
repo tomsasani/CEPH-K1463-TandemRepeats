@@ -1,7 +1,19 @@
 import pandas as pd
+from typing import Dict
+import utils
 
 PED_FILE = "tr_validation/data/file_mapping.csv"
 ped = pd.read_csv(PED_FILE, sep=",", dtype={"paternal_id": str, "maternal_id": str, "sample_id": str})
+
+BAM_TECH = "ont"
+TECH2PREF = {"ont": "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/ont-bams/GRCh38/", "element": "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/element/GRCh38_bams/"}
+TECH2SUFF = {"ont": ".minimap2.bam", "element": "-E.GRCh38.merged.sort.bam"}
+
+bam_pref, bam_suff = TECH2PREF[BAM_TECH], TECH2SUFF[BAM_TECH]
+
+def get_bam_fh(sample: str, bam_pref: str, bam_suff: str, smp2alt: Dict[str, str], use_alt: bool = False):
+    sample_id = smp2alt[sample] if use_alt else sample
+    return bam_pref + sample_id + bam_suff
 
 SMP2ALT = dict(zip(ped["sample_id"], ped["alt_sample_id"]))
 SMP2SUFF = dict(zip(ped["sample_id"].to_list(), ped["suffix"].to_list()))
@@ -9,57 +21,106 @@ SMP2DAD = dict(zip(ped["sample_id"].to_list(), ped["paternal_id"].to_list()))
 SMP2MOM = dict(zip(ped["sample_id"].to_list(), ped["maternal_id"].to_list()))
 
 SAMPLES = ped[ped["paternal_id"] != "missing"]["sample_id"].to_list()
-# SAMPLES = [s for s in SAMPLES if s not in ("2188")]
-#SAMPLES = ["2216", "2209"]
-#SAMPLES = ["2188", "2209", "2189", "2216"]
-#SAMPLES = ["2209"]
-#SAMPLES = ["2189"]
-# SAMPLES = ["200081"]
+
+# G3
+SAMPLES = ped[ped["paternal_id"] == "2209"]["sample_id"].to_list()
 
 ASSEMBLY = "GRCh38"
-#ASSEMBLY = "CHM13v2"
 
 HIPHASE_PREF = f"/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/TRGT/from_aws/{ASSEMBLY}_v1.0_50bp_merge/493ef25/hiphase/"
 
-
+TRANSMISSION_PREF = "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/TRGT/from_aws/GRCh38_v1.0_50bp_merge/493ef25/trgt-denovo/transmission/"
 
 
 rule all:
     input: 
-        "tr_validation/csv/phased/combined/phased.2gen.tsv",
-        #"tr_validation/data/vcf/slivar.filtered.vcf",
-        # "tr_validation/csv/snv/phased/combined/phased.2gen.tsv"
+        f"tr_validation/csv/combined.annotated_gp.transmission.{BAM_TECH}.tsv",
+        "tr_validation/csv/phased/combined/phased.2gen.tsv"
 
 
-
-rule find_dnm_snvs:
+rule prefilter:
     input:
-        phased_snp_vcf = f"/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/deepvariant/CEPH-1463.joint.{ASSEMBLY}.deepvariant.glnexus.phased.vcf.gz",
-        ped = "tr_validation/data/ceph.ped",
-        slivar = "/uufs/chpc.utah.edu/common/HIPAA/u1006375/bin/slivar",
-        slivar_js = "/uufs/chpc.utah.edu/common/HIPAA/u1006375/bin/slivar-functions.js"
-    output:
-        "tr_validation/data/vcf/slivar.filtered.vcf"
-    shell:
-        """
-        {input.slivar} expr --pass-only --ped {input.ped} --js {input.slivar_js} \
-                       --vcf {input.phased_snp_vcf} \
-                       --trio 'example_denovo:denovo(kid, dad, mom)' \
-                       --out-vcf {output}
-                
-        """
+    output: 
+        fh = "tr_validation/data/denovos/{SAMPLE}.filtered.tsv"
+    params:
+        mutations=lambda wildcards: "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/TRGT/from_aws/GRCh38_v1.0_50bp_merge/493ef25/trgt-denovo/" + wildcards.SAMPLE + "_" + SMP2SUFF[wildcards.SAMPLE] + "_GRCh38_50bp_merge_trgtdn.csv.gz",
+    run:
+        import pandas as pd
+        mutations = pd.read_csv(params.mutations, sep="\t")
+        mutations = utils.filter_mutation_dataframe(mutations)
+        mutations.to_csv(output.fh, sep="\t", index=False)
 
-rule convert_dnm_snvs_to_df:
+
+rule annotate_with_grandparental_evidence:
     input: 
-        vcf = "tr_validation/data/vcf/slivar.filtered.vcf",
-        py_script = "tr_validation/convert_vcf_to_df.py",
-        ped = "tr_validation/data/file_mapping.csv",
-    output: "tr_validation/csv/slivar.filtered.tsv"
+        py_script = "tr_validation/annotate_with_grandparental_evidence.py",
+        kid_mutation_df = "tr_validation/data/denovos/{SAMPLE}.filtered.tsv",
+        ped = "tr_validation/data/file_mapping.csv"
+    output:
+        out = "tr_validation/csv/annotated/{SAMPLE}.annotated_gp.tsv"
     shell:
         """
-        python {input.py_script} --vcf {input.vcf} --ped {input.ped} --out {output}
+        python {input.py_script} --mutations {input.kid_mutation_df} \
+                                 --ped {input.ped} \
+                                 --focal {wildcards.SAMPLE} \
+                                 --out {output.out}
         """
 
+
+rule annotate_with_transmission:
+    input:
+        kid_mutation_df = "tr_validation/csv/annotated/{SAMPLE}.annotated_gp.tsv",
+        py_script = "tr_validation/annotate_with_transmission.py",
+    output: "tr_validation/csv/annotated/{SAMPLE}.annotated_gp.transmission.tsv"
+    params:
+        kid_transmission_df = lambda wildcards: TRANSMISSION_PREF + wildcards.SAMPLE + "_" + SMP2SUFF[wildcards.SAMPLE] + "_GRCh38_50bp_merge_trgtdn.transmission.csv.gz" if wildcards.SAMPLE in ("2216", "2189") else "UNK",
+
+    shell:
+        """
+        python {input.py_script} --mutations {input.kid_mutation_df} \
+                                 --transmission {params.kid_transmission_df} \
+                                 --out {output}
+        """
+
+
+rule validate_mutations:
+    input:
+        py_script="tr_validation/validate_with_bams.py",
+        kid_mutation_df = "tr_validation/data/denovos/{SAMPLE}.filtered.tsv"
+    output: "tr_validation/csv/orthogonal_support/{SAMPLE}.{TECH}.read_support.csv",
+    params:
+        vcf = lambda wildcards: "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/TRGT/from_aws/GRCh38_v1.0_50bp_merge/493ef25/hiphase/" + wildcards.SAMPLE + "_" + SMP2SUFF[wildcards.SAMPLE] + "_GRCh38_50bp_merge.sorted.phased.vcf.gz",
+        kid_bam=lambda wildcards: get_bam_fh(wildcards.SAMPLE, bam_pref, bam_suff, SMP2ALT, use_alt=True if BAM_TECH == "ont" else False),
+        mom_bam=lambda wildcards: get_bam_fh(SMP2MOM[wildcards.SAMPLE], bam_pref, bam_suff, SMP2ALT, use_alt=True if BAM_TECH == "ont" else False) if SMP2MOM[wildcards.SAMPLE] != "missing" else None,
+        dad_bam=lambda wildcards: get_bam_fh(SMP2MOM[wildcards.SAMPLE], bam_pref, bam_suff, SMP2ALT, use_alt=True if BAM_TECH == "ont" else False) if SMP2DAD[wildcards.SAMPLE] != "missing" else None,
+        max_al=lambda wildcards: 100_000 if wildcards.TECH == "ont" else 120,
+
+    shell:
+        """
+        python {input.py_script} --mutations {input.kid_mutation_df} \
+                                 --vcf {params.vcf} \
+                                 --kid_bam {params.kid_bam} \
+                                 --sample_id {wildcards.SAMPLE} \
+                                 --out {output} \
+                                 --variant_type dnm \
+                                 -mom_bam {params.mom_bam} \
+                                 -dad_bam {params.dad_bam} \
+                                 -max_al {params.max_al} \                                 
+        """
+
+
+rule annotate_with_orthogonal_evidence:
+    input:
+        py_script = "tr_validation/annotate_with_orthogonal_evidence.py",
+        kid_mutation_df = "tr_validation/csv/annotated/{SAMPLE}.annotated_gp.transmission.tsv",
+        orthogonal = "tr_validation/csv/orthogonal_support/{SAMPLE}.{TECH}.read_support.csv"
+    output: "tr_validation/csv/annotated/{SAMPLE}.annotated_gp.transmission.{TECH}.tsv"
+    shell:
+        """
+        python {input.py_script} --mutations {input.kid_mutation_df} \
+                                 --orthogonal_evidence {input.orthogonal} \
+                                 --out {output}
+        """
 
 rule combine_trio_vcfs:
     input: 
@@ -93,42 +154,17 @@ rule index_trio_vcf:
         bcftools index {input}
         """
 
+
 rule annotate_with_informative_sites:
     input:
         phased_snp_vcf = "tr_validation/data/vcf/{SAMPLE}.trio.vcf.gz",
-        #phased_snp_vcf = "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/deepvariant/CEPH-1463.joint.GRCh38.deepvariant.glnexus.phased.vcf.gz",
         phased_snp_vcf_idx = "tr_validation/data/vcf/{SAMPLE}.trio.vcf.gz.csi",
         py_script = "tr_validation/annotate_with_informative_sites.py",
+        kid_mutation_df = "tr_validation/data/denovos/{SAMPLE}.filtered.tsv"
     output:
         out = "tr_validation/csv/phased/{SAMPLE}.annotated.2gen.tsv"
     params:
         kid_phased_str_vcf = lambda wildcards: HIPHASE_PREF + wildcards.SAMPLE + "_" + SMP2SUFF[wildcards.SAMPLE] + f"_{ASSEMBLY.lower() if 'CHM' in ASSEMBLY else ASSEMBLY}_50bp_merge.sorted.phased.vcf.gz",
-        kid_mutation_df = lambda wildcards: f"/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/TRGT/from_aws/{ASSEMBLY}_v1.0_50bp_merge/493ef25/trgt-denovo/" + wildcards.SAMPLE + "_" + SMP2SUFF[wildcards.SAMPLE] + f"_{ASSEMBLY.lower() if 'CHM' in ASSEMBLY else ASSEMBLY}_50bp_merge_trgtdn.csv.gz",
-        dad_id = lambda wildcards: SMP2ALT[SMP2DAD[wildcards.SAMPLE]],
-        mom_id = lambda wildcards: SMP2ALT[SMP2MOM[wildcards.SAMPLE]],
-        focal_alt_id = lambda wildcards: SMP2ALT[wildcards.SAMPLE]
-
-    shell:
-        """
-        python {input.py_script} --joint_snp_vcf {input.phased_snp_vcf} \
-                                 --focal_alt {params.focal_alt_id} \
-                                 --focal {wildcards.SAMPLE} \
-                                 --out {output.out} \
-                                 --mutations {params.kid_mutation_df} \
-                                 --str_vcf {params.kid_phased_str_vcf} \
-                                 --dad_id {params.dad_id} \
-                                 --mom_id {params.mom_id}
-        """
-
-rule annotate_snv_dnms_with_informative_sites:
-    input:
-        phased_snp_vcf = "tr_validation/data/vcf/{SAMPLE}.trio.vcf.gz",
-        phased_snp_vcf_idx = "tr_validation/data/vcf/{SAMPLE}.trio.vcf.gz.csi",
-        py_script = "tr_validation/snv_annotate_with_informative_sites.py",
-        kid_mutation_df = "tr_validation/csv/slivar.filtered.tsv"
-    output:
-        out = "tr_validation/csv/snv/phased/{SAMPLE}.annotated.2gen.tsv"
-    params:
         dad_id = lambda wildcards: SMP2ALT[SMP2DAD[wildcards.SAMPLE]],
         mom_id = lambda wildcards: SMP2ALT[SMP2MOM[wildcards.SAMPLE]],
         focal_alt_id = lambda wildcards: SMP2ALT[wildcards.SAMPLE]
@@ -140,9 +176,11 @@ rule annotate_snv_dnms_with_informative_sites:
                                  --focal {wildcards.SAMPLE} \
                                  --out {output.out} \
                                  --mutations {input.kid_mutation_df} \
+                                 --str_vcf {params.kid_phased_str_vcf} \
                                  --dad_id {params.dad_id} \
                                  --mom_id {params.mom_id}
         """
+
 
 rule phase:
     input:
@@ -155,16 +193,37 @@ rule phase:
                                  --out {output}
         """
 
-rule phase_snv:
+
+rule combine_annotated:
     input:
-        annotated_dnms = "tr_validation/csv/snv/phased/{SAMPLE}.annotated.2gen.tsv",
-        py_script = "tr_validation/phase_snv.py",
-    output: "tr_validation/csv/snv/phased/{SAMPLE}.phased.2gen.tsv"
-    shell:
-        """
-        python {input.py_script} --annotated_dnms {input.annotated_dnms} \
-                                 --out {output}
-        """
+        fhs = expand("tr_validation/csv/annotated/{SAMPLE}.annotated_gp.transmission.{TECH}.tsv", SAMPLE = SAMPLES, TECH = [BAM_TECH])
+    output:
+        fh = "tr_validation/csv/combined.annotated_gp.transmission.{TECH}.tsv"
+    run:
+        import pandas as pd
+
+        res = []
+        for fh in input.fhs:
+            df = pd.read_csv(fh, sep="\t")
+            res.append(df)
+        res_df = pd.concat(res, ignore_index=True)
+        res_df.to_csv(output.fh, index=False, sep="\t")
+
+
+rule combine_phased:
+    input:
+        fhs = expand("tr_validation/csv/phased/{SAMPLE}.phased.{{GEN}}.tsv", SAMPLE = SAMPLES)
+    output:
+        fhs = "tr_validation/csv/phased/combined/phased.{GEN}.tsv"
+    run:
+        import pandas as pd
+
+        res = []
+        for fh in input.fhs:
+            df = pd.read_csv(fh, sep="\t")
+            res.append(df)
+        res_df = pd.concat(res, ignore_index=True)
+        res_df.to_csv(output.fhs, index=False, sep="\t")
 
 
 rule phase_three_gen:
@@ -193,80 +252,3 @@ rule phase_three_gen:
                                  -mutation_type str
 
         """
-
-rule phase_three_gen_michelle:
-    input:
-        phased_snp_vcf = "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/deepvariant/CEPH-1463.joint.GRCh38.deepvariant.glnexus.phased.vcf.gz",
-        ped = "tr_validation/data/file_mapping.csv",
-        py_script = "tr_validation/phase_three_gen.py",
-        kid_mutation_df = "K1463_denovo_snvs.tsv",
-
-    output:
-        out = "tr_validation/csv/michelle.{SAMPLE}.phased.3gen.tsv"
-    params:
-        dad_id = lambda wildcards: SMP2ALT[SMP2DAD[wildcards.SAMPLE]],
-        mom_id = lambda wildcards: SMP2ALT[SMP2MOM[wildcards.SAMPLE]],
-        kid_id = lambda wildcards: wildcards.SAMPLE
-    shell:
-        """
-        python {input.py_script} --joint_snp_vcf {input.phased_snp_vcf} \
-                                 --focal {params.kid_id} \
-                                 --out {output.out} \
-                                 --mutations {input.kid_mutation_df} \
-                                 --ped {input.ped} \
-                                 --dad_id {params.dad_id} \
-                                 --mom_id {params.mom_id} \
-                                 -mutation_type snv
-        """
-
-
-
-rule combine_phased:
-    input:
-        fhs = expand("tr_validation/csv/phased/{SAMPLE}.phased.{{GEN}}.tsv", SAMPLE = SAMPLES)
-        
-    output:
-        fhs = "tr_validation/csv/phased/combined/phased.{GEN}.tsv"
-    run:
-        import pandas as pd
-
-        res = []
-        for fh in input.fhs:
-            print (fh)
-            df = pd.read_csv(fh, sep="\t")
-            res.append(df)
-        res_df = pd.concat(res, ignore_index=True)
-        res_df.to_csv(output.fhs, index=False, sep="\t")
-
-rule combine_phased_snv:
-    input:
-        fhs = expand("tr_validation/csv/snv/phased/{SAMPLE}.phased.{{GEN}}.tsv", SAMPLE = SAMPLES)
-        
-    output:
-        fhs = "tr_validation/csv/snv/phased/combined/phased.{GEN}.tsv"
-    run:
-        import pandas as pd
-
-        res = []
-        for fh in input.fhs:
-            print (fh)
-            df = pd.read_csv(fh, sep="\t")
-            res.append(df)
-        res_df = pd.concat(res, ignore_index=True)
-        res_df.to_csv(output.fhs, index=False, sep="\t")
-
-
-rule combine_phased_michelle:
-    input:
-        fhs = expand("tr_validation/csv/michelle.{SAMPLE}.phased.3gen.tsv", zip, SAMPLE = ["2188", "2209", "2189"])
-    output:
-        fhs = "tr_validation/csv/michelle.combined.phased.tsv"
-    run:
-        import pandas as pd
-
-        res = []
-        for fh in input.fhs:
-            df = pd.read_csv(fh, sep="\t")
-            res.append(df)
-        res_df = pd.concat(res)
-        res_df.to_csv(output.fhs, index=False, sep="\t")
