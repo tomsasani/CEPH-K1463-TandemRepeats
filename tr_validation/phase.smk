@@ -34,8 +34,9 @@ TRANSMISSION_PREF = "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Pall
 
 rule all:
     input: 
+        "tr_validation/csv/combined.site_stats.tsv",
         f"tr_validation/csv/combined.annotated_gp.transmission.{BAM_TECH}.tsv",
-        "tr_validation/csv/phased/combined/phased.2gen.tsv"
+        # "tr_validation/csv/phased/combined/phased.2gen.tsv"
 
 
 rule prefilter:
@@ -47,9 +48,53 @@ rule prefilter:
     run:
         import pandas as pd
         mutations = pd.read_csv(params.mutations, sep="\t")
-        mutations = utils.filter_mutation_dataframe(mutations)
+        mutations = utils.filter_mutation_dataframe(mutations, depth_min=10)
         mutations.to_csv(output.fh, sep="\t", index=False)
 
+
+rule calculate_known_sites_in_trio:
+    input:
+    output: fh = "tr_validation/csv/{SAMPLE}.site_stats.tsv"
+    params:
+        kid_vcf = lambda wildcards: "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/TRGT/from_aws/GRCh38_v1.0_50bp_merge/493ef25/hiphase/" + wildcards.SAMPLE + "_" + SMP2SUFF[wildcards.SAMPLE] + "_GRCh38_50bp_merge.sorted.phased.vcf.gz",
+        dad_vcf = lambda wildcards: "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/TRGT/from_aws/GRCh38_v1.0_50bp_merge/493ef25/hiphase/" + SMP2DAD[wildcards.SAMPLE] + "_" + SMP2SUFF[SMP2DAD[wildcards.SAMPLE]] + "_GRCh38_50bp_merge.sorted.phased.vcf.gz",
+        mom_vcf = lambda wildcards: "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/TRGT/from_aws/GRCh38_v1.0_50bp_merge/493ef25/hiphase/" + SMP2MOM[wildcards.SAMPLE] + "_" + SMP2SUFF[SMP2MOM[wildcards.SAMPLE]] + "_GRCh38_50bp_merge.sorted.phased.vcf.gz",
+    run:
+        from cyvcf2 import VCF
+        from collections import Counter
+        import tqdm
+        import numpy as np
+
+        res = [] 
+        for sample, sample_vcf in zip(("kid", "dad", "mom"), (params.kid_vcf, params.dad_vcf, params.mom_vcf)):
+            vcfh = VCF(sample_vcf, gts012=True)
+            for i, v in tqdm.tqdm(enumerate(vcfh)):
+                gt = v.gt_types[0]
+                if gt == 3:
+                    trid = v.INFO.get("TRID")
+                    res.append(trid)
+                else:
+                    depth = np.sum(v.format("SD"))
+                    if depth < 10: 
+                        res.append(trid)
+        res_counts = Counter(res).most_common()
+        res_df = pd.DataFrame(res_counts, columns=["trid", "count"])
+        res_df["sample_id"] = wildcards.SAMPLE
+        res_df.to_csv(output.fh, sep="\t", index=False)
+
+    
+rule combine_site_stats:
+    input:
+        fhs = expand("tr_validation/csv/{SAMPLE}.site_stats.tsv", SAMPLE=SAMPLES)
+    output:
+        fh = "tr_validation/csv/combined.site_stats.tsv"
+    run:
+        res = []
+        for fh in input.fhs:
+            df = pd.read_csv(fh, sep="\t")
+            res.append(df)
+        res = pd.concat(res)
+        res.to_csv(output.fh, sep="\t", index=False)
 
 rule annotate_with_grandparental_evidence:
     input: 
@@ -92,7 +137,7 @@ rule validate_mutations:
         vcf = lambda wildcards: "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/TRGT/from_aws/GRCh38_v1.0_50bp_merge/493ef25/hiphase/" + wildcards.SAMPLE + "_" + SMP2SUFF[wildcards.SAMPLE] + "_GRCh38_50bp_merge.sorted.phased.vcf.gz",
         kid_bam=lambda wildcards: get_bam_fh(wildcards.SAMPLE, bam_pref, bam_suff, SMP2ALT, use_alt=True if BAM_TECH == "ont" else False),
         mom_bam=lambda wildcards: get_bam_fh(SMP2MOM[wildcards.SAMPLE], bam_pref, bam_suff, SMP2ALT, use_alt=True if BAM_TECH == "ont" else False) if SMP2MOM[wildcards.SAMPLE] != "missing" else None,
-        dad_bam=lambda wildcards: get_bam_fh(SMP2MOM[wildcards.SAMPLE], bam_pref, bam_suff, SMP2ALT, use_alt=True if BAM_TECH == "ont" else False) if SMP2DAD[wildcards.SAMPLE] != "missing" else None,
+        dad_bam=lambda wildcards: get_bam_fh(SMP2DAD[wildcards.SAMPLE], bam_pref, bam_suff, SMP2ALT, use_alt=True if BAM_TECH == "ont" else False) if SMP2DAD[wildcards.SAMPLE] != "missing" else None,
         max_al=lambda wildcards: 100_000 if wildcards.TECH == "ont" else 120,
 
     shell:
