@@ -1,30 +1,58 @@
 from collections import Counter
-from typing import Tuple, Union
+from typing import Tuple, Union, Dict, List
 import pandas as pd
 
 import pysam
 import numpy as np
+import numba
+
+MATCH, INS, DEL = range(3)
 
 def filter_mutation_dataframe(
     mutations: pd.DataFrame,
-    remove_complex: bool = True,
-    remove_duplicates: bool = True,
+    remove_complex: bool = False,
+    remove_duplicates: bool = False,
+    remove_gp_ev: bool = False,
+    parental_overlap_frac_max: float = 0.05,
     mc_column: str = "child_MC",
     denovo_coverage_min: int = 1,
+    depth_min: int = 10,
 ):
 
-    mutations = mutations[mutations["denovo_coverage"] >= denovo_coverage_min]
+    mutations = mutations[(mutations["denovo_coverage"] >= denovo_coverage_min)]# & (mutations["allele_ratio"] > 0)]
     # only look at autosomes
     mutations = mutations[~mutations["trid"].str.contains("X|Y|Un|random", regex=True)]
     # remove pathogenics
     mutations = mutations[~mutations["trid"].str.contains("pathogenic")]
-    
+    # remove non-TRF/TRSOLVE
+    mutations = mutations[mutations["trid"].str.contains("trsolve|TRF", regex=True)]
+    # remove non-expansions/contractions
+    mutations["al_diff"] = mutations["child_AL"].apply(lambda als: np.diff(list(map(int, als.split(','))))[0])
+    mutations = mutations.query("al_diff != 0")
+    # annotate with depth and filter on depth
+    mutations["mom_dp"] = mutations["per_allele_reads_mother"].apply(lambda a: sum(list(map(int, a.split(",")))))
+    mutations["dad_dp"] = mutations["per_allele_reads_father"].apply(lambda a: sum(list(map(int, a.split(",")))))
+    mutations = mutations.query(f"child_coverage >= {depth_min} and mom_dp >= {depth_min} and dad_dp >= {depth_min}")
+
     if remove_complex:
         mutations = mutations[~mutations[mc_column].str.contains("_")]
     if remove_duplicates:
-        trid_counts = mutations.groupby("trid").size().to_dict()
-        duplicate_trids = [k for k,v in trid_counts.items() if v > 1]
-        mutations = mutations[~mutations["trid"].isin(duplicate_trids)]
+        mutations = mutations.drop_duplicates(["sample_id", "trid"])
+    
+    mutations["dad_ev"] = mutations["father_overlap_coverage"].apply(lambda o: sum(list(map(int, o.split(",")))))
+    mutations["mom_ev"] = mutations["mother_overlap_coverage"].apply(lambda o: sum(list(map(int, o.split(",")))))
+
+    mutations["dad_dp"] = mutations["per_allele_reads_father"].apply(lambda o: sum(list(map(int, o.split(",")))))
+    mutations["mom_dp"] = mutations["per_allele_reads_mother"].apply(lambda o: sum(list(map(int, o.split(",")))))
+
+    # calculate fraction of reads supporting the denovo in the parents
+    mutations["parental_overlap_coverage_total"] = mutations["dad_ev"] + mutations["mom_ev"]
+    mutations["parental_coverage_total"] = mutations["mom_dp"] + mutations["dad_dp"]
+    mutations["parental_overlap_coverage_frac"] = mutations["parental_overlap_coverage_total"] / mutations["parental_coverage_total"]
+    mutations = mutations.query(f"parental_overlap_coverage_frac <= {parental_overlap_frac_max}")
+
+    if remove_gp_ev and "gp_ev" in mutations.columns:
+        mutations = mutations[~mutations["gp_ev"].str.contains("Y")]
 
     return mutations
 
@@ -37,11 +65,10 @@ def bp_overlap(s1: int, e1: int, s2: int, e2: int):
 
 
 def count_indel_in_read(
-    ct: Tuple[int, int],
+    ct: List[Tuple[int, int]],
     rs: int,
     vs: int,
     ve: int,
-    slop: int = 20,
 ):
     """count up inserted and deleted sequence in a read
     using the pysam cigartuples object. a cigartuples object
@@ -63,53 +90,53 @@ def count_indel_in_read(
         _type_: _description_
     """
 
-    MATCH, INS, DEL = range(3)
-
-    OP2DIFF = {MATCH: 0, INS: 1, DEL: -1}
-
+    op2diff = {MATCH: 0, INS: 1, DEL: -1}
     # from SAM spec (https://samtools.github.io/hts-specs/SAMv1.pdf)
     # page 8 -- 1 if the operation consumes reference sequence
-    CONSUMES_REF = dict(zip(range(9), [1, 0, 1, 1, 0, 0, 0, 1, 1]))
-
-    # figure out start and end positions of the variant, adding
-    # some slop if desired to either side
-    var_s, var_e = vs - slop, ve + slop
+    consumes_ref = dict(zip(range(9), [1, 0, 1, 1, 0, 0, 0, 1, 1]))
 
     # loop over cigar operations in the read. if a cigar operation
     # is within the variant locus, add it to the running total of
     # ins/del operations in the read.
     cigar_op_total = 0
     cur_pos = rs
-    for op, bp in ct:
 
+    slop = 0
+
+    for op, bp in ct:
         # check if this operation type consumes reference sequence.
         # if so, we'll keep track of the bp associated with the op.
-        if bool(CONSUMES_REF[op]):
+        if bool(consumes_ref[op]):
             op_length = bp
         else:
             op_length = 0
+        # if the operation isn't an INS, DEL, or MATCH, we can
+        # just increment the running start and move on
+        if op not in (INS, DEL, MATCH):
+            cur_pos += op_length
+            continue
+        else:
+            # keep track of the *relative* start and end of the operation,
+            # given the number of consumable base pairs that have been
+            # encountered in the iteration so far.
+            op_s, op_e = cur_pos, cur_pos + max([1, op_length])
+            # if this operation overlaps our STR locus, increment our counter
+            # of net CIGAR operations.
+            # NOTE: we don't apply slop around variant start and end here.
+            overlapping_bp = bp_overlap(op_s, op_e, vs - slop, ve + slop)
 
-        # keep track of the *relative* start and end of the operation,
-        # given the number of consumable base pairs that have been
-        # encountered in the iteration so far.
-        op_s, op_e = cur_pos, cur_pos + max([1, op_length])
-
-        # if this operation overlaps our STR locus, increment our counter
-        # of net CIGAR operations
-        overlapping_bp = bp_overlap(op_s, op_e, var_s, var_e)
-
-        if overlapping_bp > 0:
-            if op == INS:
-                # print(
-                #     f"overlap: {overlapping_bp}, operation: {op}, size: {bp}, true_size: {op_length}, true_start: {op_s}, true_end: {op_e}"
-                # )
-                cigar_op_total += (bp * OP2DIFF[op])
-            elif op in (MATCH, DEL):
-                cigar_op_total += (overlapping_bp * OP2DIFF[op])
-        # increment our current position counter regardless of whether the
-        # operation overlaps our STR locus of interest
-
-        cur_pos += op_length
+            if overlapping_bp > 0:
+                if op == INS:
+                    cigar_op_total += (bp * op2diff[op])
+                elif op in (MATCH, DEL):
+                    # can replace `bp` below with `overlapping_bp` if we only
+                    # want to increment by the amount the operation overlaps the
+                    # TR. by using `bp` we increment by the full length of e.g.
+                    # a deletion that only partially overlaps the TR.
+                    cigar_op_total += (bp * op2diff[op])
+            # increment our current position counter regardless of whether the
+            # operation overlaps our STR locus of interest
+            cur_pos += op_length
 
     return cigar_op_total
 
@@ -152,8 +179,8 @@ def get_read_diff(
         return None
 
     # query the CIGAR string in the read.
-    ct = read.cigartuples
-    diff = count_indel_in_read(ct, qs, start, end, slop=slop)
+    diff = count_indel_in_read(read.cigartuples, qs, start, end)
+
     return diff
 
 
@@ -162,22 +189,9 @@ def extract_diffs_from_bam(
     chrom: str,
     start: int,
     end: int,
-    ref_al_diff: int,
-    alt_al_diff: int,
     min_mapq: int = 60,
-    is_expansion: bool = False,
 ):
     diffs = []
-
-    # if we're dealing with an expansion, we expect CIGAR
-    # operations to be insertions relative to the reference.
-    # thus, we can get away with requiring less slop, as the 
-    # read only needs to map across the full length of the reference
-    # allele.
-    slop = max([abs(ref_al_diff), abs(alt_al_diff)])
-    if is_expansion:
-        slop = 1
-
 
     if bam is None:
         diffs.append(0)
@@ -187,7 +201,7 @@ def extract_diffs_from_bam(
                 read,
                 start,
                 end,
-                slop=slop,
+                slop=1,
                 min_mapq=min_mapq,
             )
 
