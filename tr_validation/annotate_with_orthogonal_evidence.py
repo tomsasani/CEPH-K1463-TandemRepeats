@@ -3,7 +3,7 @@ import argparse
 from typing import List
 from sklearn.mixture import GaussianMixture
 import numpy as np
-
+import math
 
 def assign_allele(row: pd.Series):
 
@@ -24,68 +24,68 @@ def assign_allele(row: pd.Series):
 
     return "denovo" if is_denovo else "non_denovo"
 
-def check_for_parental_evidence(df_sub: pd.DataFrame):
+def check_for_parental_evidence(row: pd.Series):
 
-    # check that every member of trio has sufficient read
-    # support
-    if not all([p in df_sub["sample"].unique() for p in ("mom", "dad", "kid")]):
-        return "incomplete_trio"
+    # check read depth in mom, dad, and kid
+    suff_depth = True
+    mom_diffs, dad_diffs, kid_diffs = [], [], []
+    for col in ("mom_evidence", "dad_evidence", "kid_evidence"):
+        total_reads = 0
+        for diff_count in row[col].split("|"):
+            diff, count = list(map(int, diff_count.split(":")))
+            if col == "mom_evidence":
+                mom_diffs.extend([diff] * count)
+            elif col == "dad_evidence":
+                dad_diffs.extend([diff] * count)
+            else:
+                kid_diffs.extend([diff] * count)
+            total_reads += count
+        if total_reads <= 10: suff_depth = False
 
-    # keep track of what fraction of parental reads overlap the denovo
-    # range in the child's reads. shape is (n_alleles, n_parents)
-    allele_overlap = np.ones((2, 2))
+    if not suff_depth:
+        return "insufficient_read_depth_in_trio"
 
-    # fit gaussian mixture to child's reads
-    diffs = df_sub[df_sub["sample"] == "kid"]["diff"].values
-    reps = df_sub[df_sub["sample"] == "kid"]["Read support"].values
-    X = np.repeat(diffs, reps)
-    if X.shape[0] <= 1:
-        return np.max(allele_overlap, axis=1)#"insufficient_child_depth"
-    if np.unique(X).shape[0] == 1:
-        return np.max(allele_overlap, axis=1)#"child_not_heterozygous"
+    n_alleles = len(set(kid_diffs))
+    if n_alleles > 2: n_alleles = 2
+    # if len(set(kid_diffs)) == 1:
+    #     return "child_not_heterozygous"
+    allele_overlap = np.ones((n_alleles, 2))
 
-    gm = GaussianMixture(n_components=2).fit(X.reshape(-1, 1))
+    X = np.array(kid_diffs)
+
+    gm = GaussianMixture(n_components=n_alleles).fit(X.reshape(-1, 1))
     mixture_means = gm.means_ 
     mixture_cov = gm.covariances_
-    mixture_std = np.array([np.sqrt(np.trace(mixture_cov[i]) / 2) for i in range(2)])
-    # figure out if either parent has a read that overlaps a normal distribution
-    # centered around the child's means + stdevs
-    lo, hi = mixture_means - (2 * mixture_std), mixture_means + (2 * mixture_std)
-
-    for allele_i in range(2):
-        mean, std = mixture_means[allele_i], mixture_std[allele_i]
-        lo, hi = mean - std, mean + std
-        for parent_i, parent in enumerate(("mom", "dad")):
-            p_diffs = df_sub[df_sub["sample"] == parent]["diff"].values
-            p_reps = df_sub[df_sub["sample"] == parent]["Read support"].values
-            X_p = np.repeat(p_diffs, p_reps)
-            in_parent = np.sum((X_p >= lo) & (X_p <= hi))
-            allele_overlap[allele_i, parent_i] += in_parent / np.sum(p_reps)
-    total_allele_overlap = np.sum(np.sum(allele_overlap, axis=1) > 0)
-    return np.max(allele_overlap, axis=1)#"pass" if total_allele_overlap <= 1 else "both_child_alleles_in_parents"
-
-def is_validated(df: pd.DataFrame):
-
-
-    status = []
-    # make sure we have Element read evidence 
-    # in every member of the trio
-    if not all([m in df["sample"].unique() for m in ("mom", "dad", "kid")]): 
-        status.append("trio_coverage")
+    # calculate standard deviation from covariance matrix
+    # standard deviation (sigma) is sqrt of the product of the residuals with themselves 
+    # (i.e., sqrt of the mean of the trace of the covariance matrix)
+    mixture_std = np.array([np.sqrt(np.trace(mixture_cov[i]) / n_alleles) for i in range(n_alleles)])
     
-    for sample, sample_df in df.groupby("sample"):
-        # check if there's read support for the denovo in mom or dad
-        if sample in ("mom", "dad"):
-            if "denovo" in sample_df["allele_assignment"].to_list():
-                status.append(f"dnm_in_{sample}")
-        # make sure there's read support for the denovo in the kid
-        if sample == "kid":
-            if "denovo" not in sample_df["allele_assignment"].to_list():
-                status.append("no_dnm_in_kid")
+    denovo_al = int(row["exp_allele_diff_denovo"])
+    non_denovo_al = int(row["exp_allele_diff_non_denovo"])
 
-    if len(status) == 0: is_validated = "Y"
-    else: is_validated = "|".join(list(set(status)))
-    return is_validated
+    denovo_overlap, non_denovo_overlap = False, False
+    for allele_i in range(n_alleles):
+        mean, std = mixture_means[allele_i][0], 2 * mixture_std[allele_i]
+        lo, hi = mean - std, mean + std
+        # check that at least one of the allele observations in the kid
+        # overlaps the expected de novo size
+        if lo <= denovo_al <= hi:
+            denovo_overlap = True
+        if lo <= non_denovo_al <= hi:
+            non_denovo_overlap = True
+        for parent_i, parent_diffs in enumerate((mom_diffs, dad_diffs)):
+            X_p = np.array(parent_diffs)
+            in_parent = np.sum((X_p >= lo) & (X_p <= hi))
+            allele_overlap[allele_i, parent_i] = in_parent / X_p.shape[0]
+
+    if denovo_overlap: return "pass"
+    else: return "no_denovo_overlap"
+    # for each of the two alleles in the kid, return the maximum overlap
+    # with a parent's reads. the minimum value of this array will indicate
+    # the minimum amount of read overlap with a parent for one of the two
+    # alleles in the kid.
+    #return "pass" if np.min(np.max(allele_overlap, axis=1)) < 0.1 else "fail"
 
 
 def main(args):
@@ -95,52 +95,24 @@ def main(args):
         sep="\t",
         dtype={"sample_id": str},
     )
-
     ortho_evidence = pd.read_csv(args.orthogonal_evidence)
 
-    # subset element read depth information to the child, and calculate
-    # total read support
-    GROUP_COLS = [
-        "trid",
-        "sample", # whether it's mom, dad or kid
-        "genotype",
-    ]
-
-    # total number of reads in mom, dad and the child
-    ortho_totals = (
-        ortho_evidence.groupby(GROUP_COLS)
-        .agg({"Read support": "sum"})
-        .reset_index()
-        .rename(columns={"Read support": "Total read support"})
-    )
-    ortho_evidence = ortho_evidence.merge(ortho_totals, how="left")
-
-    ortho_evidence["Read support frac"] = ortho_evidence["Read support"] / ortho_evidence["Total read support"]
-
-    # for every observed number of net CIGAR operations in a read,
-    # figure out if that net CIGAR is closer to the expected net CIGAR
-    # operation for a denovo or non-denovo allele.
-    ortho_evidence["allele_assignment"] = ortho_evidence.apply(
-        lambda row: assign_allele(row),
-        axis=1,
-    )
-
-    # for every TRID, ask if the site is "validated." this requires at least
-    # one read supporting the denovo allele in the kid and zero reads supporting the
-    # denovo allele in the parents
     res: List[pd.DataFrame] = []
 
-    for (trid, genotype), sub_df in ortho_evidence.groupby(["trid", "genotype"]):
-        #is_valid = is_validated(sub_df)
-        parental_overlap = check_for_parental_evidence(sub_df)
-        sub_df["parental_overlap"] = parental_overlap
-        sub_df = sub_df[sub_df["sample"] == "kid"].drop_duplicates(["trid", "genotype"])
-        res.append(sub_df)
+    for i, row in ortho_evidence.iterrows():
+        validation = "no_element_data"
+        row_dict = row.to_dict()
+        if row[["mom_evidence", "dad_evidence", "kid_evidence"]].isna().any():
+            row_dict.update({"validation_status": validation})
+        else:
+            parental_overlap = check_for_parental_evidence(row)
+            row_dict.update({"validation_status": parental_overlap})
+        res.append(row_dict)
 
-    ortho_validation = pd.concat(res)
-    
+    ortho_validation = pd.DataFrame(res)
+
     # merge mutations with orthogonal validation
-    mutations = mutations.merge(ortho_validation, how="left")
+    mutations = mutations.merge(ortho_validation)
     mutations.to_csv(args.out, sep="\t", index=False)
 
 
