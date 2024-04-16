@@ -1,21 +1,13 @@
 from cyvcf2 import VCF
 import pandas as pd
-import csv
 import tqdm
-from bx.intervals.intersection import Interval, IntervalTree
-from collections import defaultdict, Counter
-import gzip
-import matplotlib.pyplot as plt
-import seaborn as sns
 import numpy as np 
 import argparse
-from utils import filter_mutation_dataframe
-from collect_informative_sites import catalog_informative_sites
 from typing import List, Dict
 import cyvcf2
 
 
-def var_pass(v: cyvcf2.Variant, idxs: np.ndarray):
+def var_pass(v: cyvcf2.Variant, idxs: np.ndarray, min_depth: int = 10):
     """method to ensure that informative
     variants meet basic filtering criteria.
 
@@ -28,18 +20,18 @@ def var_pass(v: cyvcf2.Variant, idxs: np.ndarray):
     """
 
     # map genotypes to expected allele balance range
-    GT2ALT_AB = {0: (0., 0.), 1: (0.2, 0.8), 2: (0.95, 1.)}
+    GT2ALT_AB = {0: (0., 0.), 1: (0.2, 0.8), 2: (1, 1.)}
 
     if v.var_type != "snp": return False
     # if the PF tag is set to TR_OVERLAP, then the SNV
     # overlaps a TR and shouldn't be used
-    # if v.format("PF") is not None:
-    #     if "TR_OVERLAP" in v.format("PF"): return False
+    if v.format("PF") is not None:
+        if "TR_OVERLAP" in v.format("PF"): return False
     if np.any(v.gt_quals[idxs] < 20): return False
     if len(v.ALT) > 1: return False
     rd, ad = v.gt_ref_depths, v.gt_alt_depths
     td = ad + rd
-    if np.any(td[idxs] < 10): return False
+    if np.any(td[idxs] < min_depth): return False
 
     ab = ad / td
     gts = v.gt_types
@@ -64,15 +56,13 @@ def catalog_informative_sites(
     dad_idx, mom_idx = smp2idx[dad], smp2idx[mom]
     kid_idx = smp2idx[child]
 
-    if child == "200081":
-        assert dad == "200080" and mom == "NA12879"
-
     res = []
     for v in vcf(region):
         # make sure variant passes basic filters
         if not var_pass(
             v,
             np.array([dad_idx, mom_idx, kid_idx]),
+            min_depth=10,
         ):
             continue
 
@@ -86,7 +76,6 @@ def catalog_informative_sites(
 
         ad, rd = v.gt_alt_depths, v.gt_ref_depths
         td = ad + rd
-        ab = ad / td
 
         # make sure parents don't have the same genotype,
         # and make sure kid is HET.
@@ -131,13 +120,10 @@ def catalog_informative_sites(
         out_dict = {
             "inf_chrom": v.CHROM,
             "inf_pos": v.POS,
-            "dad_inf_gt": str(dad_gt), #"|".join((str(dad_hap_0), str(dad_hap_1))) if dad_phased else "/".join((str(dad_hap_0), str(dad_hap_1))),
-            "mom_inf_gt": str(mom_gt),#"|".join((str(mom_hap_0), str(mom_hap_1))) if mom_phased else "/".join((str(mom_hap_0), str(mom_hap_1))),
+            "dad_inf_gt": str(dad_gt), 
+            "mom_inf_gt": str(mom_gt),
             "kid_inf_gt": "|".join((str(kid_hap_0), str(kid_hap_1))),
             "kid_inf_ps": kid_ps,
-            "dad_dp": td[dad_idx],
-            "mom_dp": td[mom_idx],
-            "kid_dp": td[kid_idx],
             "haplotype_A_origin": hap_0_origin,
             "haplotype_B_origin": hap_1_origin,
             "dad_haplotype_origin": dad_haplotype_origin,
@@ -180,21 +166,13 @@ def main(args):
     KID_STR_VCF = VCF(args.str_vcf, gts012=True)
     SNP_VCF = VCF(args.joint_snp_vcf, gts012=True)
 
-    print (args.focal, args.dad_id, args.mom_id)
-
-    SLOP = 100_000
+    SLOP = 500_000
 
     SMP2IDX = dict(zip(SNP_VCF.samples, range(len(SNP_VCF.samples))))
 
     CHROMS = [f"chr{c}" for c in range(1, 23)]
 
     mutations = pd.read_csv(args.mutations, sep="\t")
-    mutations = filter_mutation_dataframe(
-        mutations,
-        remove_complex=True,
-        remove_duplicates=True,
-        mc_column="child_MC"
-    )
     print (f"Total of {mutations.shape[0]} DNMs")
 
     dnm_phases = []
@@ -203,21 +181,17 @@ def main(args):
 
     informative_sites: List[pd.DataFrame] = []
 
+
     # loop over STR de novos in the dataframe
     for _, row in tqdm.tqdm(mutations.iterrows()):
         row_dict = row.to_dict()
         # extract chrom, start and end
         trid = row["trid"]
-        try:
-            trid_chrom, trid_start, trid_end, _ = trid.split("_")
-            trid_start, trid_end = int(trid_start) - 1, int(trid_end)
-        except ValueError:
-            # dnm_phases.append(row_dict)
-            continue
-
+        trid_chrom, trid_start, trid_end, _ = trid.split("_")
+        trid_start, trid_end = int(trid_start) - 1, int(trid_end)
+        
         # make sure we're looking at an autosome for now
         if trid_chrom not in CHROMS:
-            dnm_phases.append(row_dict)
             continue
 
         phase_start, phase_end = trid_start - SLOP, trid_end + SLOP
@@ -235,7 +209,6 @@ def main(args):
                 smp2idx=SMP2IDX,
             )
         if informative_phases.shape[0] == 0: 
-            dnm_phases.append(row_dict)
             continue
 
         # add information about the region in which we searched for informative
@@ -263,7 +236,6 @@ def main(args):
                 continue
             if not is_phased: 
                 NOT_PHASED += 1
-                dnm_phases.append(row_dict)
                 continue
 
             # concatenate the alleles at this locus

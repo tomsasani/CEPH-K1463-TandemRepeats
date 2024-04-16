@@ -56,6 +56,7 @@ def annotate_with_gp(
 def get_suffix(ped: pd.DataFrame, sample_id: str):
     return ped[ped["sample_id"] == sample_id]["suffix"].values[0]
 
+
 def main(args):
 
     # read in ped file
@@ -96,6 +97,7 @@ def main(args):
     mutations["motif"] = mutations.apply(lambda row: query_motif_at_trid(row["trid"], pgf), axis=1)
     mutations["gp_ev"] = mutations.apply(lambda row: annotate_with_gp(row, pgf, pgm, mgf, mgm), axis=1)
     mutations["sample_id"] = args.focal
+
     mutations.to_csv(args.out, sep="\t", index=False)
 
 if __name__ == "__main__":
