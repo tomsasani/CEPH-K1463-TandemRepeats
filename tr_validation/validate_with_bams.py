@@ -39,13 +39,6 @@ def main(args):
     elif args.variant_type == "dnm":
         mutations = pd.read_csv(args.mutations, sep="\t")
 
-        # mutations = pd.DataFrame(
-        #     {
-        #         "trid": ["chr7_67180632_67180660_trsolve"],
-        #         "index": [1],
-        #         "child_AL": ["28,40"],
-        #     }
-        # )
 
     # read in the VCF file
     vcf = VCF(args.vcf, gts012=True)
@@ -57,8 +50,6 @@ def main(args):
 
     # store output
     res = []
-
-    SKIPPED, TOTAL_SITES = [], 0
 
     # loop over mutations in the dataframe
     with open(args.mutations, "r") as infh:
@@ -104,15 +95,24 @@ def main(args):
                 # figure out the motif(s) that's repeated in the STR
                 tr_motif = var.INFO.get("MOTIFS")
 
-                # if the total length of the allele is greater than the length of
-                # a typical read, move on
-                if max([denovo_al, non_denovo_al]) > int(args.max_al):
-                    res.append(row_dict)
-                    continue
-
                 # calculate expected diffs between alleles and the reference genome.
                 exp_diff_denovo = denovo_al - len(var.REF)
                 exp_diff_non_denovo = non_denovo_al - len(var.REF)
+
+                # if the total length of the allele is greater than the length of
+                # a typical read, move on
+                if max([denovo_al, non_denovo_al]) > int(args.max_al):
+                    #res.append(row_dict)
+                    continue
+
+                row_dict.update(
+                    {
+                        "region": region,
+                        "motif": tr_motif,
+                        "exp_allele_diff_denovo": exp_diff_denovo,
+                        "exp_allele_diff_non_denovo": exp_diff_non_denovo,
+                    }
+                )
 
                 # loop over reads in the BAM for this individual
                 bam_evidence = {
@@ -120,8 +120,6 @@ def main(args):
                     "dad_evidence": None,
                     "kid_evidence": None,
                 }
-
-
 
                 for bam, label in zip(
                     (mom_bam, dad_bam, kid_bam),
@@ -132,42 +130,29 @@ def main(args):
                         chrom,
                         start,
                         end,
-                        min_mapq=1,
+                        min_mapq=20,
                     )
 
-                    evidence = {f"{label}_evidence": "|".join([":".join(list(map(str, [diff, count]))) for diff, count in diff_counts])}
-                    row_dict.update(evidence)
+                    total_depth = sum([v for k, v in diff_counts])
+                    if total_depth < 10: 
+                        continue
+                    else:
+                        evidence = {
+                            f"{label}_evidence": "|".join(
+                                [
+                                    ":".join(list(map(str, [diff, count])))
+                                    for diff, count in diff_counts
+                                ]
+                            )
+                        }
+                        bam_evidence.update(evidence)
 
-                row_dict.update(
-                    {
-                        "region": region,
-                        "motif": tr_motif,
-                        "exp_allele_diff_denovo": exp_diff_denovo,
-                        "exp_allele_diff_non_denovo": exp_diff_non_denovo,
-                    }
-                )
-                res.append(row_dict)
+                if any([v is None for k, v in bam_evidence.items()]):
+                    continue
+                else:
+                    row_dict.update(bam_evidence)
+                    res.append(row_dict)
 
-                # for diff, count in diff_counts:
-                #     row_dict = d.copy()
-                #     row_dict.update({
-                #         "region": region,
-                #         "sample": label,
-                #         "motif": tr_motif,
-                #         "diff": diff,
-                #         "Read support": count,
-                #         "exp_allele_diff_denovo": exp_diff_denovo,
-                #         "exp_allele_diff_non_denovo": exp_diff_non_denovo,
-                #     })
-                #     res.append(row_dict)
-
-    print(
-        "TOTAL sites: ",
-        mutations.shape[0],
-        TOTAL_SITES,
-    )
-    for reason, count in Counter(SKIPPED).most_common():
-        print(f"{reason}: {count}")
     res_df = pd.DataFrame(res)
 
     res_df.to_csv(args.out, index=False)
