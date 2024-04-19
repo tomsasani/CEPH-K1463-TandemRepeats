@@ -27,20 +27,32 @@ def al_in_parents(row: pd.Series):
         return True
     else: return False
 
-# def likely_de_novo_size(row: pd.Series):
-#     child_als = row["child_AL"].split(",")
-#     # denovo idx
-#     denovo_idx = int(row["index"])
-#     non_denovo_idx = 1 - denovo_idx
-#     denovo_al, non_denovo_al = child_als[denovo_idx], child_als[non_denovo_idx]
+def add_likely_de_novo_size(row: pd.Series):
+    child_als = list(map(int, row["child_AL"].split(",")))
+    # denovo idx
+    denovo_idx = int(row["index"])
+    non_denovo_idx = 1 - denovo_idx
+    denovo_al, non_denovo_al = child_als[denovo_idx], child_als[non_denovo_idx]
 
-#     mom_als, dad_als = row["mother_AL"].split(","), row["father_AL"].split(",")
+    mom_als, dad_als = list(map(int, row["mother_AL"].split(","))), list(map(int, row["father_AL"].split(",")))
 
-#     if (non_denovo_al in dad_als) and (non_denovo_al not in mom_als):
-#         # calculate diff
-#     elif (denovo_al in dad_als) and (non_denovo_al in mom_als):
-#         return True
-#     else: return False
+    # if the child's non-denovo AL is in dad and not in mom, the de novo AL
+    # probably came from mom
+    if (non_denovo_al in dad_als) and (non_denovo_al not in mom_als):
+        denovo_diffs = np.array([denovo_al - al for al in mom_als])
+        min_diff_idx = np.argmin(denovo_diffs)
+        # likely original AL
+        return denovo_diffs[min_diff_idx]
+    # if the child's non-denovo AL is in mom but not in dad, the de novo AL
+    # probably came from dad
+    elif (denovo_al in dad_als) and (non_denovo_al in mom_als):
+        denovo_diffs = np.array([denovo_al - al for al in dad_als])
+        min_diff_idx = np.argmin(denovo_diffs)
+        # likely original AL
+        return denovo_diffs[min_diff_idx]
+    else: 
+        # otherwise, we can't know
+        return np.nan
 
 def filter_mutation_dataframe(
     mutations: pd.DataFrame,
@@ -49,7 +61,6 @@ def filter_mutation_dataframe(
     remove_gp_ev: bool = False,
     remove_inherited: bool = False,
     parental_overlap_frac_max: float = 1,
-    mc_column: str = "child_MC",
     denovo_coverage_min: int = 1,
     depth_min: int = 10,
 ):
@@ -57,23 +68,20 @@ def filter_mutation_dataframe(
     if denovo_coverage_min > 0:
         mutations = mutations[
             (mutations["denovo_coverage"] >= denovo_coverage_min)
-            #& (mutations["allele_ratio"] > 0)
-            #& (mutations["child_ratio"] > 0)
+           & (mutations["allele_ratio"] > 0)
+           & (mutations["child_ratio"] > 0)
         ]
     else:
         mutations = mutations[
             (mutations["denovo_coverage"] >= denovo_coverage_min)
         ]
-    # only look at autosomes
+    # only look at autosomes + X
     mutations = mutations[~mutations["trid"].str.contains("X|Y|Un|random", regex=True)]
     # remove pathogenics
     mutations = mutations[~mutations["trid"].str.contains("pathogenic")]
     # remove non-TRF/TRSOLVE
     mutations = mutations[mutations["trid"].str.contains("trsolve|TRF", regex=True)]
-    # # remove non-expansions/contractions
-    # if remove_interruptions:
-    #     mutations["al_diff"] = mutations["child_AL"].apply(lambda als: np.diff(list(map(int, als.split(','))))[0])
-    #     mutations = mutations.query("al_diff != 0")
+    # remove sites where de novo AL is observed in a parent
     mutations["denovo_al_in_parents"] = mutations.apply(lambda row: al_in_parents(row), axis=1)
     if remove_inherited:
         mutations = mutations[~mutations["denovo_al_in_parents"]]
@@ -83,9 +91,8 @@ def filter_mutation_dataframe(
     mutations["dad_dp"] = mutations["per_allele_reads_father"].apply(lambda a: sum(list(map(int, a.split(",")))))
     mutations = mutations.query(f"child_coverage >= {depth_min} and mom_dp >= {depth_min} and dad_dp >= {depth_min}")
 
-
     if remove_complex:
-        mutations = mutations[~mutations[mc_column].str.contains("_")]
+        mutations = mutations[~mutations["child_MC"].str.contains("_")]
     if remove_duplicates:
         dup_cols = ["trid"]
         if "sample_id" in mutations.columns:
@@ -108,6 +115,8 @@ def filter_mutation_dataframe(
     if remove_gp_ev and "gp_ev" in mutations.columns:
         mutations = mutations[~mutations["gp_ev"].str.contains("Y")]
 
+    mutations["denovo_size"] = mutations.apply(lambda row: add_likely_de_novo_size(row), axis=1)
+
     return mutations
 
 
@@ -119,14 +128,9 @@ def bp_overlap(s1: int, e1: int, s2: int, e2: int):
     )
 
 
-# @numba.njit
 def count_indel_in_read(
-    ct: List[Tuple[int, int]],
-    rs: int,
-    vs: int,
-    ve: int,
-    slop: int = 1,
-):
+    ct: List[Tuple[int, int]], rs: int, vs: int, ve: int, slop: int = 1
+) -> int:
     """count up inserted and deleted sequence in a read
     using the pysam cigartuples object. a cigartuples object
     is a list of tuples -- each tuple stores a CIGAR operation as
@@ -137,14 +141,14 @@ def count_indel_in_read(
     the expected STR locus interval (+/- the size of the STR expansion).
 
     Args:
-        ct (Tuple[int, int]): _description_
-        rs (int): _description_
-        re (int): _description_
-        vs (int): _description_
-        ve (int): _description_
+        ct (Tuple[int, int]): cigartuples object
+        rs (int): start of read w/r/t reference
+        re (int): end of read w/r/t reference
+        vs (int): start of TR locus in reference
+        ve (int): end of TR locus in reference
 
     Returns:
-        _type_: _description_
+        int: net ins/del sequence in read w/r/t reference
     """
 
     # loop over cigar operations in the read. if a cigar operation
@@ -176,14 +180,7 @@ def count_indel_in_read(
 
             if overlapping_bp > 0:
                 cigar_op_total += (bp * OP2DIFF[op])
-                # if op == INS:
-                #     cigar_op_total += (bp * OP2DIFF[op])
-                # elif op in (MATCH, DEL):
-                #     # can replace `bp` below with `overlapping_bp` if we only
-                #     # want to increment by the amount the operation overlaps the
-                #     # TR. by using `bp` we increment by the full length of e.g.
-                #     # a deletion that only partially overlaps the TR.
-                #     cigar_op_total += (bp * OP2DIFF[op])
+
             # increment our current position counter regardless of whether the
             # operation overlaps our STR locus of interest
             cur_pos += op_length
@@ -209,7 +206,7 @@ def get_read_diff(
         slop (int, optional): amount of slop around the start and end of the variant reported site. Defaults to 0.
 
     Returns:
-        Union[None, int]: _description_
+        Union[None, int]: either None (if the read fails basic checks) or the net ins/del in read w/r/t reference
     """
 
     # initial filter on mapping quality
@@ -218,13 +215,7 @@ def get_read_diff(
 
     qs, qe = read.reference_start, read.reference_end
 
-    # ensure that this read completely overlaps the expected repeat expansion.
-    # NOTE: we are *very* stringent when considering reads, and only include
-    # reads that align completely across the reported variant location +/-
-    # the expected size of the expanded allele. for example, if the location
-    # of the reference STR is reported in the VCF as chr1:50-60 and we expect
-    # the expansion to be 10bp in size, we only consider reads that align
-    # completely across the interval chr1:40-70.
+    # ensure that this read completely overlaps the TR locus
     if qs > (start - slop) or qe < (end + slop):
         return None
 
@@ -246,7 +237,20 @@ def extract_diffs_from_bam(
     start: int,
     end: int,
     min_mapq: int = 60,
-):
+) -> List[Tuple[int, int]]:
+    """gather information from all reads aligned to the specified region.
+
+    Args:
+        bam (pysam.AlignmentFile): pysam.AlignmentFile object
+        chrom (str): chromosome we want to query
+        start (int): start of TR locus
+        end (int): end of TR locus
+        min_mapq (int, optional): minimum MAPQ required for reads. Defaults to 60.
+
+    Returns:
+        List[Tuple[int, int]]: List of (X, Y) tuples where X is the read "diff" and Y is the
+         number of reads with that "diff" 
+    """
     diffs = []
 
     if bam is None:
