@@ -6,8 +6,7 @@ def main(args):
 
     mutations = pd.read_csv(
         args.mutations,
-        sep="\t",
-        dtype={"sample_id": str},
+        sep="\t"
     )
 
     INH_COL = "children_with_denovo_allele"
@@ -17,14 +16,10 @@ def main(args):
         transmission = pd.read_csv(
             args.transmission,
             sep=";",
-            dtype={"sample_id": str, INH_COL: "str"},
+            dtype={INH_COL: "str"},
         )
 
-        mutations = mutations.merge(
-            transmission,
-            on=["trid", "index", "denovo_coverage", "sample_id"],
-            how="left",
-        )
+        mutations = mutations.merge(transmission)
 
     mutations.to_csv(args.out, sep="\t", index=False)
 

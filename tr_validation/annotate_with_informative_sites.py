@@ -177,10 +177,7 @@ def main(args):
 
     dnm_phases = []
 
-    WRONG_TRID, NOT_PHASED, NON_AUTOSOMAL = 0, 0, 0
-
     informative_sites: List[pd.DataFrame] = []
-
 
     # loop over STR de novos in the dataframe
     for _, row in tqdm.tqdm(mutations.iterrows()):
@@ -222,7 +219,6 @@ def main(args):
         for var in KID_STR_VCF(f"{trid_chrom}:{trid_start}-{trid_end}"):
             # ensure the VCF TRID matches the TR TRID
             if var.INFO.get("TRID") != trid: 
-                WRONG_TRID += 1
                 continue
 
             motif = var.INFO.get("MOTIFS")
@@ -235,7 +231,6 @@ def main(args):
                 print ("### WARNING ###", var.genotypes[0])
                 continue
             if not is_phased: 
-                NOT_PHASED += 1
                 continue
 
             # concatenate the alleles at this locus
@@ -314,8 +309,6 @@ def main(args):
         lambda row: row["haplotype_{}_origin".format(row["denovo_hap_id"])],
         axis=1,
     )
-
-    merged_dnms_inf_consistent["sample_id"] = args.focal
 
     merged_dnms_inf_consistent.to_csv(args.out, index=False, sep="\t")
 

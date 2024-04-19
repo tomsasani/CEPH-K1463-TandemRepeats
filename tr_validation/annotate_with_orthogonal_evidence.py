@@ -26,11 +26,8 @@ def assign_allele(row: pd.Series):
 
 def check_for_parental_evidence(row: pd.Series):
 
-    # check read depth in mom, dad, and kid
-    suff_depth = True
     mom_diffs, dad_diffs, kid_diffs = [], [], []
     for col in ("mom_evidence", "dad_evidence", "kid_evidence"):
-        total_reads = 0
         for diff_count in row[col].split("|"):
             diff, count = list(map(int, diff_count.split(":")))
             if col == "mom_evidence":
@@ -39,16 +36,11 @@ def check_for_parental_evidence(row: pd.Series):
                 dad_diffs.extend([diff] * count)
             else:
                 kid_diffs.extend([diff] * count)
-            total_reads += count
-        if total_reads <= 10: suff_depth = False
-
-    if not suff_depth:
-        return "insufficient_read_depth_in_trio"
 
     n_alleles = len(set(kid_diffs))
     if n_alleles > 2: n_alleles = 2
-    # if len(set(kid_diffs)) == 1:
-    #     return "child_not_heterozygous"
+    if len(set(kid_diffs)) == 1:
+        return "child_not_heterozygous"
     allele_overlap = np.ones((n_alleles, 2))
 
     X = np.array(kid_diffs)
@@ -79,40 +71,36 @@ def check_for_parental_evidence(row: pd.Series):
             in_parent = np.sum((X_p >= lo) & (X_p <= hi))
             allele_overlap[allele_i, parent_i] = in_parent / X_p.shape[0]
 
-    if denovo_overlap: return "pass"
-    else: return "no_denovo_overlap"
+    #if denovo_overlap: return "pass"
+    #else: return "no_denovo_overlap"
     # for each of the two alleles in the kid, return the maximum overlap
     # with a parent's reads. the minimum value of this array will indicate
     # the minimum amount of read overlap with a parent for one of the two
     # alleles in the kid.
-    #return "pass" if np.min(np.max(allele_overlap, axis=1)) < 0.1 else "fail"
+    return f"pass|{str(round(np.min(np.max(allele_overlap, axis=1)), 2))}"
 
 
 def main(args):
 
     mutations = pd.read_csv(
         args.mutations,
-        sep="\t",
-        dtype={"sample_id": str},
+        sep="\t"
     )
     ortho_evidence = pd.read_csv(args.orthogonal_evidence)
 
     res: List[pd.DataFrame] = []
 
     for i, row in ortho_evidence.iterrows():
-        validation = "no_element_data"
         row_dict = row.to_dict()
-        if row[["mom_evidence", "dad_evidence", "kid_evidence"]].isna().any():
-            row_dict.update({"validation_status": validation})
-        else:
-            parental_overlap = check_for_parental_evidence(row)
-            row_dict.update({"validation_status": parental_overlap})
+        parental_overlap = check_for_parental_evidence(row)
+        row_dict.update({"validation_status": parental_overlap})
         res.append(row_dict)
 
     ortho_validation = pd.DataFrame(res)
 
     # merge mutations with orthogonal validation
-    mutations = mutations.merge(ortho_validation)
+    mutations = mutations.merge(ortho_validation, how="left").fillna({"validation_status": "no_element_data"})
+    
     mutations.to_csv(args.out, sep="\t", index=False)
 
 
