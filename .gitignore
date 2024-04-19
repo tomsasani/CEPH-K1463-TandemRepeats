@@ -2,3 +2,9 @@
 exphunt/
 tr_validation/csv/
 tr_validation/fig/
+*.png
+*.csv
+*.tsv
+test/
+data/
+__pycache__/
