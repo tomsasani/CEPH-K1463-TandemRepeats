@@ -6,15 +6,13 @@ import cyvcf2
 from typing import Dict, List
 from utils import filter_mutation_dataframe
 import glob
-from build_roc_curve_dnms import get_dp, annotate_with_allr, check_for_overlap
-from plot_depth_ratios import get_binomial_p
-import tqdm
+import datetime
 
-plt.rc("font", size=16)
+plt.rc("font", size=14)
 
 
-def calculate_phase_counts(df: pd.DataFrame):
-    phase_counts = df.groupby(["sample_id", "phase"]).size().reset_index().rename(columns={0: "count"})
+def calculate_phase_counts(df: pd.DataFrame, group_cols: List[str] = ["sample_id", "phase"]):
+    phase_counts = df.groupby(group_cols).size().reset_index().rename(columns={0: "count"})
     totals = phase_counts.groupby("sample_id").agg({"count": "sum"}).reset_index().rename(columns={"count": "total"})
 
     phase_counts = phase_counts.merge(totals)
@@ -23,26 +21,47 @@ def calculate_phase_counts(df: pd.DataFrame):
 
 GEN = "2gen"
 
-# loop over phased mutation dataframes
-res = []
+mutations = []
 for fh in glob.glob("tr_validation/csv/filtered_and_merged/*.tsv"):
     df = pd.read_csv(fh, sep="\t", dtype={"sample_id": str})
-    res.append(df)
-df = pd.concat(res).fillna("unknown")
+    mutations.append(df)
+mutations = pd.concat(mutations).fillna({"children_with_denovo_allele": "unknown", "phase_summary": "unknown"})
 
-df = filter_mutation_dataframe(
-    df,
+mutations = filter_mutation_dataframe(
+    mutations,
     remove_complex=False,
-    remove_duplicates=True,
-    remove_gp_ev=False,
+    remove_duplicates=False,
+    remove_gp_ev=True,
     remove_inherited=True,
     parental_overlap_frac_max=0.05,
     denovo_coverage_min=2,
     depth_min=10,
 )
-df["pass_inf_sites"] = df.apply(lambda row: ((float(row["n_upstream"]) > 1) | (float(row["n_downstream"]) > 1)) if row["phase_summary"] != "unknown" else True, axis=1)
-#df = df[(df["phase_summary"] == "unknown") | ((df["n_upstream"].astype(float) > 1) | (df["n_downstream"].astype(float) > 1))]
-df = df[df["pass_inf_sites"] == True]
+mutations["pass_inf_sites"] = mutations.apply(
+    lambda row: (
+        ((float(row["n_upstream"]) > 1) | (float(row["n_downstream"]) > 1))
+        if row["phase_summary"] != "unknown"
+        else True
+    ),
+    axis=1,
+)
+mutations = mutations[mutations["pass_inf_sites"] == True]
+
+mutations["is_transmitted"] = mutations["children_with_denovo_allele"].apply(lambda c: c != "unknown")
+
+# # remove untransmitted
+# mutations = mutations[
+#     (
+#         (mutations["sample_id"].isin(["2216", "2189"]))
+#         & (mutations["children_with_denovo_allele"] != "unknown")
+#     )
+#     | (
+#         (~mutations["sample_id"].isin(["2216", "2189"]))
+#         & (mutations["children_with_denovo_allele"] == "unknown")
+#     )
+# ]
+
+print (mutations.query("sample_id == '2189'")[["children_with_denovo_allele"]])
 
 ped = pd.read_csv(
     "tr_validation/data/file_mapping.csv",
@@ -50,60 +69,89 @@ ped = pd.read_csv(
 )
 
 sample2dad = dict(zip(ped["sample_id"], ped["paternal_id"]))
-df["dad_sample_id"] = df["sample_id"].apply(lambda s: sample2dad[s])
+mutations["dad_sample_id"] = mutations["sample_id"].apply(lambda s: sample2dad[s])
 
 
-df["phase"] = df["phase_summary"].apply(lambda p: p.split(":")[0])
+mutations["phase"] = mutations["phase_summary"].apply(lambda p: p.split(":")[0])
 
-phase_counts = calculate_phase_counts(df)
+phase_counts = calculate_phase_counts(mutations, group_cols=["sample_id", "phase", "is_transmitted"])
 ages = pd.read_csv("tr_validation/data/k20_parental_age_at_birth.csv", dtype={"sample_id": str, "UGRP Lab ID (archive)": str})
-phase_counts["generation"] = phase_counts["sample_id"].apply(lambda s: "G4" if str(s).startswith("200") else "G2" if s in ("2209", "2188") else "G3")
 
-sns.set_style("ticks")
-
-f, ax = plt.subplots(figsize=(12, 8))
-
-order = phase_counts[phase_counts["phase"] == "dad"].sort_values("fraction", ascending=False)["sample_id"].to_list()
+order = phase_counts.groupby("sample_id").agg({"count": "sum"}).sort_values("count").reset_index()["sample_id"].to_list()
 order2idx = dict(zip(order, range(len(order))))
 
 phase_counts["order_idx"] = phase_counts["sample_id"].apply(lambda s: order2idx[s])
-print (phase_counts)
 
 ind = np.arange(phase_counts["sample_id"].nunique())
+
 bottom = np.zeros(ind.shape[0])
 
-for phase, phase_df in phase_counts.groupby("phase"):
-    sorted_phase_df = phase_df.sort_values("order_idx", ascending=False)
-    vals = sorted_phase_df["fraction"].values
-    counts = sorted_phase_df["count"].values
+f, ax = plt.subplots(figsize=(8, 5))
+
+# for phase, phase_df in only_phased.groupby("phase"):
+#     sorted_phase_df = phase_df.sort_values("order_idx")
+#     vals = sorted_phase_df["fraction"].values
+#     counts = sorted_phase_df["count"].values
+#     ax2.barh(
+#         ind,
+#         vals,
+#         1,
+#         left=bottom,
+#         ec="w",
+#         lw=2,
+#         color="goldenrod" if phase == "dad" else "cornflowerblue",
+#         label="Paternal" if phase == "dad" else "Maternal"
+#     )
+#     bottom += vals
+# ax2.legend(ncol=2, fancybox=True, shadow=True, loc="upper center", bbox_to_anchor=(0.5, 1.075))
+# ax2.set_xlabel("Fraction of phased TR DNMs")
+# sns.despine(ax=ax2)
+# bottom = np.zeros(ind.shape[0])
+
+for (phase, is_transmitted), phase_df in phase_counts.groupby(["phase", "is_transmitted"]):
+    sorted_phase_df = phase_df.sort_values("order_idx")
+    print (sorted_phase_df)
+    vals = np.zeros(ind.shape[0])
+    idxs = sorted_phase_df["order_idx"].values
+    vals[idxs] = sorted_phase_df["count"].values
     ax.barh(
         ind,
         vals,
         1,
         left=bottom,
         ec="w",
-        lw=2,
+        #ls=":" if is_transmitted else "-",
+        hatch="x" if is_transmitted else None,
+        lw=1,
         color="gainsboro" if phase == "unknown" else "goldenrod" if phase == "dad" else "cornflowerblue",
+        label=f'{"Paternal" if phase == "dad" else "Maternal" if phase == "mom" else "Unknown"}' if not is_transmitted else None,
     )
-    for y_i in ind:
-        x = vals[y_i] / 3 + bottom[y_i]
-        y = y_i - 0.1
-        text = str(counts[y_i])
-        if y_i == ind.shape[0] - 1: 
-            adj = 4 if phase in ("dad", "unknown") else 5
-            x = vals[y_i] / adj + bottom[y_i]
-            pref = "Mat." if phase == "mom" else "Pat." if phase == "dad" else "Unk."
-            text = f"{pref} (n = {counts[y_i]})"
-        ax.text(x, y, text, c="w" if phase != "unknown" else "k", size=18)
+    # for y_i in ind:
+    #     x = vals[y_i] / 3 + bottom[y_i]
+    #     y = y_i - 0.1
+    #     text = str(counts[y_i])
+    #     if y_i == ind.shape[0] - 1: 
+    #         adj = 4 if phase in ("dad", "unknown") else 5
+    #         x = vals[y_i] / adj + bottom[y_i]
+    #         pref = "Mat." if phase == "mom" else "Pat." if phase == "dad" else "Unk."
+    #         #text = f"{pref} (n = {counts[y_i]})"
+    #         #text = f"(n = {counts[y_i]})"
+    #     ax1.text(x, y, text, c="w" if phase != "unknown" else "k", size=14)
     
 
     bottom += vals
 ax.set_yticks(ind)
-ax.set_yticklabels(phase_counts.drop_duplicates("sample_id").sort_values("order_idx", ascending=False)["sample_id"].unique())
+ax.set_yticklabels(phase_counts.drop_duplicates("sample_id").sort_values("order_idx")["sample_id"].unique())
 ax.set_ylabel("Sample ID")
-ax.set_xlabel("Fraction of TR DNMs")
+ax.set_xlabel("Number of TR DNMs")
+ax.legend(title="Parent-of-origin", fancybox=True, shadow=True, bbox_to_anchor=(0.75, 0.35), fontsize=12)
 sns.despine(ax=ax, left=True)
-ax.set_title("Inferred parent-of-origin for TR DNMs")
+
+now = datetime.datetime.now()
+ax.text(0.5, 0.5, f"draft ({str(now).split(' ')[0]})", transform=ax.transAxes,
+        fontsize=20, color='gray', alpha=0.25,
+        ha='center', va='center', rotation=30)
+
 f.tight_layout()
 f.savefig("phase.png", dpi=200)
 
