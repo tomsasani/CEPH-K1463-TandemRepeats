@@ -39,7 +39,6 @@ def main(args):
     elif args.variant_type == "dnm":
         mutations = pd.read_csv(args.mutations, sep="\t")
 
-
     # read in the VCF file
     vcf = VCF(args.vcf, gts012=True)
 
@@ -59,22 +58,19 @@ def main(args):
             if i == 0: 
                 header = l
                 continue
+            # convert the pd.Series into a dict we can update
+            # with addtl info later
             row_dict = dict(zip(header, l))
 
             # extract chrom, start and end
             trid = row_dict["trid"]
-
             chrom, start, end, _ = trid.split("_")
             start, end = int(start) - 1, int(end)
-
             region = f"{chrom}:{start}-{end}"
 
             # for sites at which we've detected a de novo,
             # figure out which allele lengths correspond to the
-            # de novo and non de novo alleles. if we're passing
-            # in a complete dataframe of all TRIDs (e.g., to estimate
-            # a denominator), the `index` is meaningless but ensures
-            # compatability with below logic.
+            # de novo and non de novo alleles.
             denovo_idx = int(row_dict["index"])
             assert denovo_idx in (0, 1)
 
@@ -82,7 +78,7 @@ def main(args):
             denovo_al = allele_lengths[denovo_idx]
             non_denovo_al = allele_lengths[1 - denovo_idx]
 
-            # loop over VCF, allowing for slop to ensure we hit the STR
+            # loop over VCF
             for var in vcf(region):
                 # ensure the VCF TRID matches the TR TRID
                 var_trid = var.INFO.get("TRID")
@@ -99,10 +95,9 @@ def main(args):
                 exp_diff_denovo = denovo_al - len(var.REF)
                 exp_diff_non_denovo = non_denovo_al - len(var.REF)
 
-                # if the total length of the allele is greater than the length of
+                # if the total length of either allele is greater than the length of
                 # a typical read, move on
                 if max([denovo_al, non_denovo_al]) > int(args.max_al):
-                    #res.append(row_dict)
                     continue
 
                 row_dict.update(
@@ -133,10 +128,13 @@ def main(args):
                         min_mapq=20,
                     )
 
+                    # calculate the total number of queryable reads
+                    # for this individual. if that's < 10, move on.
                     total_depth = sum([v for k, v in diff_counts])
                     if total_depth < 10: 
                         continue
                     else:
+                        # otherwise, summarize the orthogonal evidence
                         evidence = {
                             f"{label}_evidence": "|".join(
                                 [
@@ -147,6 +145,8 @@ def main(args):
                         }
                         bam_evidence.update(evidence)
 
+                # if any members of the trio had fewer than 10 "good" reads,
+                # skip this site
                 if any([v is None for k, v in bam_evidence.items()]):
                     continue
                 else:
@@ -204,10 +204,4 @@ if __name__ == "__main__":
 
     args = p.parse_args()
 
-    # lp = LineProfiler()
-    # lp.add_function(reformat_cigartuples)
-
-    # lp_wrapper = lp(main)
-    # lp_wrapper(args)
-    # lp.print_stats()
     main(args)
