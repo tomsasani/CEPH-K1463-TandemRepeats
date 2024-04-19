@@ -51,32 +51,52 @@ def main(args):
     raw_loci = raw_loci.merge(annotations, left_on="trid", right_on="TRid")
 
     # add some columns we'll use to group by
-    raw_loci["motif_size"] = raw_loci["motifs"].apply(lambda m: len(m))
-    raw_loci["is_complex"] = raw_loci["n_motifs"].apply(lambda n: n > 1)
+    raw_loci["motif_size"] = raw_loci.apply(lambda row: len(row["motifs"]) if row["n_motifs"] == 1 else -1, axis=1)
 
-    # bin by reference allele length
-    # raw_loci["reference_allele_length"] = raw_loci["end"] - raw_loci["start"]
-    # raw_loci["binned_reference_allele_length"] = raw_loci
+    print (raw_loci.query("motif_size == 1").groupby("motifs").size())
 
-    GROUP_COLS = ["motif_size"]
+    # NOTE: if we are using transmission, we need to adjust the denominator to
+    # only include sites with >= 10 reads in the G3 individuals' children.
+    insufficient_depth_sites = []
+    for fh in args.children_sites:
+        if fh == "None": continue
+        df = pd.read_csv(fh, sep="\t")
+        trids = df["trid"].to_list()
+        insufficient_depth_sites.extend(trids)
+    insufficient_depth_sites = list(set(insufficient_depth_sites))
+    raw_loci = raw_loci[~raw_loci["trid"].isin(insufficient_depth_sites)]
+
+    # NOTE: if we are filtering on grandparental evidence, we need to adjust the denominator to
+    # only include sites with >= 10 reads in the G3 individuals' grandparents.
+    insufficient_depth_sites = []
+    for fh in args.grandparent_sites:
+        df = pd.read_csv(fh, sep="\t")
+        trids = df["trid"].to_list()
+        insufficient_depth_sites.extend(trids)
+    insufficient_depth_sites = list(set(insufficient_depth_sites))
+    raw_loci = raw_loci[~raw_loci["trid"].isin(insufficient_depth_sites)]
+
+    raw_loci["chrom"] = raw_loci["trid"].apply(lambda t: t.split("_")[0])
+
+    GROUP_COLS = ["motif_size", "chrom"]#, "insufficient_depth_in_children", "insufficient_depth_in_grandparents"]
 
     res = []
     # loop over samples grouped by motif size to start
-    for motif_size, sub_df in tqdm.tqdm(raw_loci.groupby(GROUP_COLS)):
+    for (motif_size, chrom), sub_df in tqdm.tqdm(raw_loci.groupby(GROUP_COLS)):
         # denominator is the number of annotated loci of the specified motif size
         # in the specified sample
         denom = sub_df.shape[0]
         
         res.append(
             {
-                "motif_size": motif_size[0],
+                "motif_size": motif_size,
+                "chrom": chrom,
                 "denominator": denom,
             }
         )
 
     res_df = pd.DataFrame(res)
     res_df["sample_id"] = args.sample_id
-    print (args.sample_id, res_df["denominator"].sum())
 
     res_df.to_csv(args.out, sep="\t", index=False)
 
@@ -88,5 +108,6 @@ if __name__ == "__main__":
     p.add_argument("--out")
     p.add_argument("--sample_id")
     p.add_argument("-children_sites", nargs="*", required=False)
+    p.add_argument("-grandparent_sites", nargs="*", required=False)
     args = p.parse_args()
     main(args)
