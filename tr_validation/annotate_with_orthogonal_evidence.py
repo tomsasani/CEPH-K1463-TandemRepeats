@@ -24,8 +24,19 @@ def assign_allele(row: pd.Series):
 
     return "denovo" if is_denovo else "non_denovo"
 
-def check_for_parental_evidence(row: pd.Series):
+def annotate_with_concordance(row: pd.Series) -> str:
+    """given orthogonal evidence at a locus, figure out whether
+    the orthogonal evidence is concordant with the expected genotype
+    in the child.
 
+    Args:
+        row (pd.Series): pd.Series object
+
+    Returns:
+        str: annotation label
+    """
+
+    # gather diffs in all members of the trio
     mom_diffs, dad_diffs, kid_diffs = [], [], []
     for col in ("mom_evidence", "dad_evidence", "kid_evidence"):
         for diff_count in row[col].split("|"):
@@ -37,47 +48,46 @@ def check_for_parental_evidence(row: pd.Series):
             else:
                 kid_diffs.extend([diff] * count)
 
+    # figure out the difference between the expected
+    # sizes of the de novo and non-de novo alleles
+    denovo_al = int(row["exp_allele_diff_denovo"])
+    non_denovo_al = int(row["exp_allele_diff_non_denovo"])
+    exp_diff = denovo_al - non_denovo_al
+    # how many alleles do we expect to see in the kid? i.e., is the kid HOM or HET?
+    n_alleles_exp = 1 if exp_diff == 0 else 2
+
+    # figure out the observed number of distinct alleles in the kid
     n_alleles = len(set(kid_diffs))
-    if n_alleles > 2: n_alleles = 2
-    if len(set(kid_diffs)) == 1:
-        return "child_not_heterozygous"
-    allele_overlap = np.ones((n_alleles, 2))
+    if n_alleles != n_alleles_exp:
+        return "not_ibs"
 
+    # fit a Guassian mixture model to the child's allele length
+    # distribution with the expected number of components equal to
+    # the expected number of alleles
     X = np.array(kid_diffs)
-
-    gm = GaussianMixture(n_components=n_alleles).fit(X.reshape(-1, 1))
+    gm = GaussianMixture(n_components=n_alleles_exp).fit(X.reshape(-1, 1))
+    # get the means and covariance sof the two components
     mixture_means = gm.means_ 
     mixture_cov = gm.covariances_
     # calculate standard deviation from covariance matrix
-    # standard deviation (sigma) is sqrt of the product of the residuals with themselves 
+    # standard deviation (sigma) is sqrt of the product of the residuals with themselves
     # (i.e., sqrt of the mean of the trace of the covariance matrix)
-    mixture_std = np.array([np.sqrt(np.trace(mixture_cov[i]) / n_alleles) for i in range(n_alleles)])
-    
-    denovo_al = int(row["exp_allele_diff_denovo"])
-    non_denovo_al = int(row["exp_allele_diff_non_denovo"])
+    mixture_std = np.array(
+        [np.sqrt(np.trace(mixture_cov[i]) / n_alleles_exp) for i in range(n_alleles_exp)]
+    )
 
-    denovo_overlap, non_denovo_overlap = False, False
-    for allele_i in range(n_alleles):
+    # check to see if the kid's mixture components +/- STDEV overlap the expected
+    # allele sizes. assume this locus passes by default.
+    overlap = True
+    for allele_i in range(n_alleles_exp):
         mean, std = mixture_means[allele_i][0], 2 * mixture_std[allele_i]
         lo, hi = mean - std, mean + std
-        # check that at least one of the allele observations in the kid
-        # overlaps the expected de novo size
-        if lo <= denovo_al <= hi:
-            denovo_overlap = True
-        if lo <= non_denovo_al <= hi:
-            non_denovo_overlap = True
-        for parent_i, parent_diffs in enumerate((mom_diffs, dad_diffs)):
-            X_p = np.array(parent_diffs)
-            in_parent = np.sum((X_p >= lo) & (X_p <= hi))
-            allele_overlap[allele_i, parent_i] = in_parent / X_p.shape[0]
+        # if this component doesn't overlap *either* the de novo or non denovo allele,
+        # set overlap to False
+        if not (lo <= denovo_al <= hi) and not (lo <= non_denovo_al <= hi):
+            overlap = False
 
-    #if denovo_overlap: return "pass"
-    #else: return "no_denovo_overlap"
-    # for each of the two alleles in the kid, return the maximum overlap
-    # with a parent's reads. the minimum value of this array will indicate
-    # the minimum amount of read overlap with a parent for one of the two
-    # alleles in the kid.
-    return f"pass|{str(round(np.min(np.max(allele_overlap, axis=1)), 2))}"
+    return "pass" if overlap else "fail"
 
 
 def main(args):
@@ -92,7 +102,7 @@ def main(args):
 
     for i, row in ortho_evidence.iterrows():
         row_dict = row.to_dict()
-        parental_overlap = check_for_parental_evidence(row)
+        parental_overlap = annotate_with_concordance(row)
         row_dict.update({"validation_status": parental_overlap})
         res.append(row_dict)
 
