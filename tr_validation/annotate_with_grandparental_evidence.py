@@ -1,6 +1,8 @@
 import pandas as pd
 import argparse
 import cyvcf2
+import numpy as np
+
 
 VCF_PREF = "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/TRGT/from_aws/GRCh38_v1.0_50bp_merge/493ef25"
 VCF_SUFF = "GRCh38_50bp_merge.sorted.vcf.gz"
@@ -12,6 +14,9 @@ def query_al_at_trid(trid: str, vcf: cyvcf2.VCF):
     allele_lengths = None
     for v in vcf(region):
         if trid != v.INFO.get("TRID"): continue
+        spanning_reads = v.format("SD")
+        if np.sum(spanning_reads) <= 10: continue
+        
         allele_lengths = v.format("AL")
     return allele_lengths
 
@@ -96,7 +101,6 @@ def main(args):
     
     mutations["motif"] = mutations.apply(lambda row: query_motif_at_trid(row["trid"], pgf), axis=1)
     mutations["gp_ev"] = mutations.apply(lambda row: annotate_with_gp(row, pgf, pgm, mgf, mgm), axis=1)
-    mutations["sample_id"] = args.focal
 
     mutations.to_csv(args.out, sep="\t", index=False)
 
