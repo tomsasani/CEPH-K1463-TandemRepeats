@@ -5,57 +5,166 @@ import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1.inset_locator import mark_inset, zoomed_inset_axes, inset_axes
 import seaborn as sns
 import utils
+import datetime
+from collections import Counter
+import tqdm
+
+plt.rc("font", size=13)
+
+def gc_frac(motif: str):
+    gc_bp, bp = 0, 0
+    for m in motif.split(","):
+        gc_bp += sum([b in ("G", "C") for b in list(m)])
+        bp += len(m)
+    return gc_bp / bp
+
+ped = pd.read_csv("tr_validation/data/file_mapping.csv", dtype={"sample_id": str, "alt_sample_id": str})
+smp2alt = dict(zip(ped["sample_id"], ped["alt_sample_id"]))
 
 mutations = []
 for fh in glob.glob("tr_validation/csv/filtered_and_merged/*.tsv"):
-    df = pd.read_csv(fh, sep="\t")
+    df = pd.read_csv(fh, sep="\t", dtype={"sample_id": str})
     mutations.append(df)
-mutations = pd.concat(mutations).fillna({"children_with_denovo_allele": "unknown"})
+mutations = pd.concat(mutations).fillna({"children_with_denovo_allele": "unknown", "phase_summary": "unknown"})
 
+# annotate samples that theoretically have transmission information
+mutations["has_transmission"] = mutations["sample_id"].apply(lambda s: s in ("2189", "2216"))
+# annotate mutations with motif size
+
+mutations["complex"] = mutations["child_MC"].str.contains("_")
+
+mutations["motif_size"] = mutations.apply(lambda row: len(row["motif"]) if row["complex"] is False else -1, axis=1)
+
+print (mutations.query("motif_size == 1").groupby("motif").size())
+
+
+REMOVE_COMPLEX = False
+
+## filter mutations
+mutations = utils.filter_mutation_dataframe(
+    mutations,
+    remove_complex=REMOVE_COMPLEX,
+    remove_duplicates=False,
+    remove_gp_ev=True,
+    remove_inherited=True,
+    parental_overlap_frac_max=1,
+    denovo_coverage_min=2,
+    depth_min=10,
+)
+
+# filter to sites that have transmission information if relevant
+mutations = mutations[(mutations["has_transmission"] == False) | (mutations["children_with_denovo_allele"] != "unknown")]
+
+print (mutations.query("motif_size == 1").groupby("motif").size())
+
+# mutations["chrom"] = mutations["trid"].apply(lambda t: t.split("_")[0])
+# mutations["start"] = mutations["trid"].apply(lambda t: t.split("_")[1])
+# mutations["end"] = mutations["trid"].apply(lambda t: t.split("_")[2])
+# mutations["inheritance"] = mutations["phase_summary"].apply(lambda p: "paternal" if p.split(":")[0] == "dad" else "maternal" if p.split(":")[0] == "mom" else "cannot_determine")
+# mutations["children_with_denovo_allele"] = mutations["children_with_denovo_allele"].apply(lambda c: "|".join(c.split(",")))
+# mutations["variant_type"] = "de novo"
+# mutations["sample_id"] = mutations["sample_id"].apply(lambda s: smp2alt[s])
+# mutations[
+#     [
+#         "sample_id",
+#         "chrom",
+#         "start",
+#         "end",
+#         "motif",
+#         "variant_type",
+#         "inheritance",
+#         "children_with_denovo_allele",
+#     ]
+# ].to_csv(
+#     "combined.tr.for_michelle.tsv",
+#     sep="\t",
+#     index=False,
+# )
+
+# read in denominators
 denoms = []
 for fh in glob.glob("tr_validation/csv/rates/*.denominator.tsv"):
-    df = pd.read_csv(fh, sep="\t")
+    df = pd.read_csv(fh, sep="\t", dtype={"sample_id": str})
     denoms.append(df)
 denoms = pd.concat(denoms)
 
-res_df = mutations.merge(denoms)
-print (res_df)
+# denoms["motif_size"] = denoms.apply(lambda row: -1 if row["is_complex"] else row["motif_size"], axis=1)
 
-res_df["numerator"] = 1
+# remove complex loci if we're doing that
+if REMOVE_COMPLEX:
+    denoms = denoms[denoms["is_complex"] == False]
 
-res_df_grouped = res_df.groupby(["motif_size", "has_transmission"]).agg({"numerator": "sum", "denominator": "sum"}).reset_index().rename(columns={"numerator": "num_total", "denominator": "denom_total"})
-res_df_grouped["ci"] = res_df_grouped.apply(lambda row: 1.96 * np.sqrt(row["num_total"] / row["denom_total"]), axis=1)
-res_df_grouped["ci_lo"] = res_df_grouped.apply(lambda row: (row["num_total"] - row["ci"]) / row["denom_total"], axis=1)
-res_df_grouped["ci_hi"] = res_df_grouped.apply(lambda row: (row["num_total"] + row["ci"]) / row["denom_total"], axis=1)
-res_df_grouped["rate"] = res_df_grouped["num_total"] / res_df_grouped["denom_total"]
-res_df = res_df.merge(res_df_grouped)
+# sum across chromosomes if we've already grouped by that
+if "chrom" in denoms:
+    denoms = denoms.groupby(["sample_id", "motif_size"]).agg({"denominator": "sum"}).reset_index()
+
+# bootstrap within groups to get confidence intervals
+bootstrapped_counts = []
+n = 100
+for _ in tqdm.tqdm(range(n)):
+    # bootstrap resample the mutations
+    mutations_resampled = mutations.sample(frac=1, replace=True)
+    mutation_counts = (
+        mutations_resampled.groupby(
+            [
+                "sample_id",
+                "motif_size",
+                "has_transmission",
+            ]
+        )
+        .size()
+        .reset_index()
+        .rename(columns={0: "numerator"})
+    )
+    mutation_counts["bs"] = _
+    bootstrapped_counts.append(mutation_counts)
+
+bootstrapped_counts = pd.concat(bootstrapped_counts)
+
+mutation_counts = (
+    mutations.groupby(
+        [
+            "sample_id",
+            "motif_size",
+            "has_transmission",
+        ]
+    )
+    .size()
+    .reset_index()
+    .rename(columns={0: "numerator"})
+)
+
+# merge mutations with denominators
+res_df = bootstrapped_counts.merge(denoms)
+res_df["rate"] = res_df["numerator"] / res_df["denominator"]
+
+# use poisson CIs
+# res_df_grouped = res_df.groupby(["motif_size", "has_transmission"]).agg({"numerator": "sum", "denominator": "sum"}).reset_index().rename(columns={"numerator": "num_total", "denominator": "denom_total"})
+# res_df_grouped["ci"] = res_df_grouped.apply(lambda row: 1.96 * np.sqrt(row["num_total"] / row["denom_total"]), axis=1)
+# res_df_grouped["ci_lo"] = res_df_grouped.apply(lambda row: (row["num_total"] - row["ci"]) / row["denom_total"], axis=1)
+# res_df_grouped["ci_hi"] = res_df_grouped.apply(lambda row: (row["num_total"] + row["ci"]) / row["denom_total"], axis=1)
+# res_df_grouped["rate"] = res_df_grouped["num_total"] / res_df_grouped["denom_total"]
+
+# res_df = res_df.merge(res_df_grouped)
 
 # plot rates across samples
 f, ax = plt.subplots(figsize=(12, 5))
 
 x, y = "motif_size", "rate"
+palette = {True: "goldenrod", False: "cornflowerblue"}
 
-for group, group_df in res_df_grouped.query("motif_size <= 100").groupby("has_transmission"):
-    group_df = group_df.sort_values("motif_size", ascending=True)
-    ax.plot(
-        group_df[x],
-        group_df[y],
-        label="Transmitted to G4" if group else "Untransmitted",
-        lw=2,
-    )
-    # ax.scatter(
-    #     group_df[x],
-    #     group_df[y],
-    # )
-    ax.fill_between(
-        group_df[x],
-        group_df["ci_lo"],
-        group_df["ci_hi"],
-        color="gainsboro",
-        alpha=0.5,
-    )
+sns.lineplot(
+    data=res_df.query("motif_size <= 100 and motif_size >= 1"),
+    x=x,
+    y=y,
+    hue="has_transmission",
+    errorbar=("ci", 95),
+    ax=ax,
+    palette=palette,
+)
 
-axins = inset_axes(
+# create inset ax
+ax_strs = inset_axes(
     ax,
     3,
     2,
@@ -63,96 +172,46 @@ axins = inset_axes(
     axes_kwargs={"yscale": "log"},
 )
 
-for group, group_df in res_df_grouped.query("motif_size <= 6").groupby("has_transmission"):
-    group_df = group_df.sort_values("motif_size", ascending=True)
-    axins.plot(
-        group_df[x],
-        group_df[y],
-        lw=2,
-    )
-    axins.fill_between(
-        group_df[x],
-        group_df["ci_lo"],
-        group_df["ci_hi"],
-        color="gainsboro",
-        alpha=0.5,
-    )
-axins.set_xlim(1, 6)
-axins.set_xlabel("Motif size (bp)")
-# axins.set_title("Short tandem repeats (STRs)")
+# ax_complex = inset_axes(
+#     ax,
+#     1.5,
+#     1.,
+#     loc="upper left",
+#     axes_kwargs={"yscale": "log"},
+# )
 
-# mark_inset(ax, axins, loc1=1, loc2=3, fc="none", lw=1, ec="k")#, ec="0.5")
+# sns.barplot(data=res_df.query("motif_size == -1"), x=x, y=y, hue="has_transmission", errorbar=None, palette=palette)
 
-ax.text(0.5, 0.5, 'draft (2024/4/11)', transform=ax.transAxes,
+# ax_complex.get_legend().remove()
+# ax_complex.set_ylabel(None)
+# sns.despine(ax=ax_complex)
+# ax_complex.set_xticklabels(["Complex (2+ motifs)"])
+# ax_complex.set_xlabel(None)
+
+sns.lineplot(
+    data=res_df.query("motif_size <= 6 and motif_size >= 1"),
+    x=x,
+    y=y,
+    hue="has_transmission",
+    errorbar=("ci", 95),
+    ax=ax_strs,
+    palette=palette,
+)
+
+ax_strs.set_xlabel("Motif size (bp)")
+ax_strs.set_ylabel(None)
+ax_strs.get_legend().remove()
+
+# add watermark
+now = datetime.datetime.now()
+ax.text(0.5, 0.5, f"draft ({str(now).split(' ')[0]})", transform=ax.transAxes,
         fontsize=20, color='gray', alpha=0.25,
         ha='center', va='center', rotation=30)
 
 ax.set_yscale("log")
 ax.set_ylabel("Mutation rate\n(per locus, per generation)")
 ax.set_xlabel("Motif size (bp)")
-ax.set_title("Autosomal, non-pathogenic STR mutation rates in K1463 (G3)")
-ax.legend(frameon=False)#, title="Transmission to G4?")
+ax.legend(fancybox=True, shadow=True, title="Validated via transmission to G4?")
 sns.despine(ax=ax)
-f.savefig("rates.png", dpi=200)
-
-
-# # aggregate across samples
-# res_df_totals = res_df.groupby(["motif_size", "has_transmission"]).agg({"numerator": "sum", "denominator": "sum"}).reset_index()
-# res_df_totals["rate"] = res_df_totals["numerator"] / res_df_totals["denominator"]
-# # calculate poisson confidence intervals
-# res_df_totals["ci"] = res_df_totals.apply(lambda row: 1.96 * np.sqrt(row["numerator"] / row["denominator"]), axis=1)
-# res_df_totals["ci_lo"] = res_df_totals.apply(lambda row: (row["numerator"] - row["ci"]) / row["denominator"], axis=1)
-# res_df_totals["ci_hi"] = res_df_totals.apply(lambda row: (row["numerator"] + row["ci"]) / row["denominator"], axis=1)
-
-# # plot rates after aggregating
-# f, ax = plt.subplots()
-# for has_transmission, sub_df in res_df_totals.query("motif_size <= 6").groupby("has_transmission"):
-#     ax.plot(sub_df["motif_size"], sub_df["rate"], label=has_transmission)
-#     ax.fill_between(x=sub_df["motif_size"], y1=sub_df["ci_lo"], y2=sub_df["ci_hi"], alpha=0.25, color="gainsboro")
-# ax.set_yscale("log")
-# ax.set_ylabel("Mutation rate\n(per locus, per generation)")
-# ax.set_xlabel("Motif length")
-# ax.set_title("STR mutation rates in K1463 (G3)")
-# sns.despine(ax=ax)
-# ax.legend(frameon=False, title="Transmission to G4?")
 # f.tight_layout()
-# f.savefig("rates.mean.png", dpi=200)
-
-
-# # f, ax = plt.subplots(figsize=(8, 4))
-# # res_df_totals = res_df.groupby(["sample_id", "phase"]).agg({"numerator": "sum", "denominator": "sum"}).reset_index()
-# # res_df_totals["rate"] = res_df_totals["numerator"] / res_df_totals["denominator"]
-
-# # ind = np.arange(res_df_totals["sample_id"].nunique())
-# # smp2idx = dict(zip(res_df_totals["sample_id"].unique(), ind))
-# # res_df_totals["ind"] = res_df_totals["sample_id"].apply(lambda s: smp2idx[s])
-
-# # bottom = np.zeros(ind.shape[0])
-# # for phase, phase_df in res_df_totals.groupby("phase"):
-# #     #if phase == "unknown": continue
-# #     phase_df_sorted = phase_df.sort_values("ind", ascending=True)
-# #     vals = phase_df_sorted["numerator"].values
-# #     ax.bar(ind, vals, 1, bottom=bottom, label=phase, ec="w", lw=1)
-# #     bottom += vals
-# # ax.set_xticks(ind)
-# # ax.set_xticklabels(smp2idx.keys())
-# # ax.set_ylabel("Mutation rate\n(per locus, per generation)")
-# # ax.set_xlabel("Sample ID")
-# # ax.legend(frameon=False)
-# # sns.despine(ax=ax)
-# # f.tight_layout()
-# # f.savefig("rates_bar.png", dpi=200)
-
-# # # merge with ped
-# # ped = pd.read_csv(
-# #     "tr_validation/data/k20_parental_age_at_birth.csv", dtype={"UGRP Lab ID (archive)": str}
-# # )
-
-# # res_df_merged = res_df.merge(ped, left_on="sample_id", right_on="UGRP Lab ID (archive)").query("motif_size <= 6")
-
-# # res_df_merged_total = res_df_merged.groupby(["sample_id", "PaAge"]).agg({"rate": "sum"}).reset_index()
-
-# # f, ax = plt.subplots()
-# # sns.regplot(data=res_df_merged_total, x="PaAge", y="rate")
-# # sns.despine(ax=ax)
-# # f.savefig("age_rates.png", dpi=200)
+f.savefig("rates.png", dpi=200)
