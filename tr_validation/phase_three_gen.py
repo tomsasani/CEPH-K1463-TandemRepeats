@@ -117,48 +117,32 @@ def main(args):
 
     SPOUSE = SMP2ALT[SPOUSE]
     CHILDREN = [SMP2ALT[c] for c in CHILDREN]
-    #CHILDREN = [c for c in CHILDREN if c not in ("NA12879", "NA12886")]
-
-    print (f"sample {args.focal} has dad {args.dad_id} and mom {args.mom_id}")
 
     # define the amount of slop (in bp) around a de novo to look for informative sites
-    SLOP = 200_000
+    SLOP = 250_000
 
     INH_COL = "children_with_denovo_allele"
 
-    if args.mutation_type == "str":
+    transmission = pd.read_csv(
+        args.transmission,
+        sep=";",
+        dtype={
+            "sample_id": str,
+            INH_COL: str,
+        },
+    ).dropna(subset=[INH_COL])
 
-        transmission = pd.read_csv(
-            args.transmission,
-            sep=";",
-            dtype={
-                "sample_id": str,
-                INH_COL: str,
-            },
-        ).dropna(subset=[INH_COL])
+    # filter to the samples of interest
+    transmission = transmission[transmission["sample_id"] == args.focal]
 
-        # filter to the samples of interest
-        transmission = transmission[transmission["sample_id"] == args.focal]
+    mutations = pd.read_csv(args.mutations, sep="\t", dtype={"sample_id": str})
 
-        mutations = pd.read_csv(args.mutations, sep="\t", dtype={"sample_id": str})
+    mutations = mutations.merge(transmission)#, on=["trid", "index", "denovo_coverage"])
 
-        mutations = mutations.merge(transmission)#, on=["trid", "index", "denovo_coverage"])
-
-        # remove pathogenics
-        mutations["region"] = mutations["trid"].apply(lambda t: trid_to_region(t))
-        mutations["chrom"] = mutations["region"].apply(lambda r: r.split(":")[0])
-        mutations = mutations[mutations["region"] != "UNK"]
-
-    elif args.mutation_type == "snv":
-
-        mutations = pd.read_csv(args.mutations, sep="\t").dropna()
-        mutations["sample_id"] = mutations["sample_id"].apply(lambda s: s.split("_")[1])
-        mutations = mutations[mutations["child_ids"] != "none"]
-        # print (mutations["child_ids"].unique())
-
-        mutations[INH_COL] = mutations["child_ids"].apply(lambda children: ",".join([c.split("_")[1] for c in children.split(",")]))
-        mutations = mutations[mutations["sample_id"] == args.focal]
-        mutations["region"] = mutations.apply(lambda row: f"{row['chrom']}:{row['start']}-{row['end']}", axis=1)
+    # remove pathogenics
+    mutations["region"] = mutations["trid"].apply(lambda t: trid_to_region(t))
+    mutations["chrom"] = mutations["region"].apply(lambda r: r.split(":")[0])
+    mutations = mutations[mutations["region"] != "UNK"]
 
     mutations["n_with_denovo_allele"] = mutations[INH_COL].apply(lambda c: len(c.split(",")))
     mutations = mutations[mutations["n_with_denovo_allele"] >= 1]
@@ -214,7 +198,7 @@ def main(args):
 
             row_dict["most_common_hap"] = most_common_hap
             row_dict["most_common_freq"] = most_common_freq
-            row_dict["candidate_postzygotic"] = "Y" if is_pz else "N"
+            row_dict["candidate_postzygotic"] = is_pz
             row_dict["n_inf"] = len(phase_info)
 
             res.append(row_dict)
@@ -224,14 +208,14 @@ def main(args):
     res_df["phase"] = res_df["most_common_hap"].apply(lambda c: c.split(":")[0] if c != "UNK" and len(c.split(":")[1]) > 0 else "unknown")
     res_df["consistent"] = res_df["most_common_freq"] >= 0.8
     #res_df["true_phase"] = res_df.apply(lambda row: row["true_phase"] if row["consistent"] else "UNK", axis=1)
-    res_df.drop(
-        columns=[
-            INH_COL,
-            "region",
-            "n_with_denovo_allele",
-        ]
-    ).to_csv(args.out, sep="\t", index=False)
-
+    # res_df.drop(
+    #     columns=[
+    #         INH_COL,
+    #         "region",
+    #         "n_with_denovo_allele",
+    #     ]
+    # )res_df.to_csv(args.out, sep="\t", index=False)
+    res_df.to_csv(args.out, sep="\t", index=False)
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
