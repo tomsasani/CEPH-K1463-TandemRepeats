@@ -36,13 +36,23 @@ def get_grandparents(sample_id: str, ped: pd.DataFrame):
 PED_FILE = "tr_validation/data/file_mapping.csv"
 ped = pd.read_csv(PED_FILE, sep=",", dtype={"paternal_id": str, "maternal_id": str, "sample_id": str})
 
+ASSEMBLY = "GRCh38"
+# ASSEMBLY = "CHM13v2"
 BAM_TECH = "element"
-TECH2PREF = {"ont": "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/ont-bams/GRCh38/", 
-             "element": "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/element/GRCh38_bams/",
-             "hifi": "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/hifi-bams/GRCh38/"}
+
+TECH2PREF = {"ont": f"/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/ont-bams/{ASSEMBLY.split('v2')[0]}/", 
+             "element": f"/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/element/{ASSEMBLY.split('v2')[0]}_bams/",
+             "illumina": f"/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/CEPH/cram/",
+             "hifi": f"/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/hifi-bams/{ASSEMBLY.split('v2')[0]}/"}
 TECH2SUFF = {"ont": ".minimap2.bam", 
-             "element": "-E.GRCh38.merged.sort.bam",
-             "hifi": ".GRCh38.haplotagged.bam"}
+             "element": f"-E.{ASSEMBLY.split('v2')[0]}.merged.sort.bam",
+             "illumina": ".cram",
+             "hifi": f".{ASSEMBLY.split('v2')[0].lower() if 'CHM' in ASSEMBLY else ASSEMBLY.split('v2')[0]}.haplotagged.bam"}
+
+ILLUMINA_REF = "/scratch/ucgd/lustre/common/data/Reference/GRCh38/human_g1k_v38_decoy_phix.fasta"
+
+ASSEMBLY2CATLOG = {"GRCh38": "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/TRGT/from_aws/staging/catalogs/human_GRCh38_no_alt_analysis_set.palladium-v1.0.trgt.annotations.bed.gz",
+                   "CHM13v2": "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/TRGT/from_aws/staging/catalogs/chm13v2.0_maskedY_rCRS.palladium-v1.0.trgt.annotations.bed.gz"}
 
 bam_pref, bam_suff = TECH2PREF[BAM_TECH], TECH2SUFF[BAM_TECH]
 
@@ -54,18 +64,16 @@ SMP2MOM = dict(zip(ped["sample_id"].to_list(), ped["maternal_id"].to_list()))
 SAMPLES = ped[ped["paternal_id"] == "2209"]["sample_id"].to_list()
 ALL_SAMPLES = ped["sample_id"].to_list()
 
-ASSEMBLY = "GRCh38"
-# ASSEMBLY = "CHM13v2"
-
 AWS_PREF = f"/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/TRGT/from_aws/{ASSEMBLY}_v1.0_50bp_merge/493ef25/"
 
 rule all:
     input:
         expand("tr_validation/csv/filtered_and_merged/{SAMPLE}.{ASSEMBLY}.tsv", SAMPLE=SAMPLES, ASSEMBLY=[ASSEMBLY]),
         expand("tr_validation/csv/rates/{SAMPLE}.{ASSEMBLY}.denominator.tsv", SAMPLE=SAMPLES, ASSEMBLY=[ASSEMBLY]),
-        expand("tr_validation/csv/phased/{SAMPLE}.GRCh38.phased.3gen.tsv", SAMPLE=["2216", "2189"]),
+        expand("tr_validation/csv/phased/{SAMPLE}.{ASSEMBLY}.phased.3gen.tsv", SAMPLE=["2216", "2189"], ASSEMBLY=[ASSEMBLY]),
         expand("tr_validation/csv/orthogonal_support/{SAMPLE}.{ASSEMBLY}.{TECH}.tsv", SAMPLE=SAMPLES, ASSEMBLY=[ASSEMBLY], TECH=[BAM_TECH]),
-        #expand("tr_validation/data/all_loci/orthogonal_support/{SAMPLE}.{ASSEMBLY}.{TECH}.read_support.csv", SAMPLE=SAMPLES, ASSEMBLY=[ASSEMBLY], TECH=[BAM_TECH]),
+        # expand("tr_validation/data/all_loci/orthogonal_support/{SAMPLE}.{ASSEMBLY}.{TECH}.read_support.csv", SAMPLE=SAMPLES, ASSEMBLY=[ASSEMBLY], TECH=["illumina", "element", "ont", "hifi"]),
+        # expand("tr_validation/data/all_loci/orthogonal_support/{SAMPLE}.{ASSEMBLY}.{TECH}.read_support.csv", SAMPLE=SAMPLES, ASSEMBLY=[ASSEMBLY], TECH=["element"]),
 
 rule prefilter_all_loci:
     input:
@@ -74,7 +82,7 @@ rule prefilter_all_loci:
         fh = "tr_validation/data/all_loci/{SAMPLE}.{ASSEMBLY}.prefiltered.tsv"
     params:
         kid_mutation_df = lambda wildcards: AWS_PREF + "trgt-denovo/" + wildcards.SAMPLE + "_" + SMP2SUFF[wildcards.SAMPLE] + f"_{wildcards.ASSEMBLY.lower() if 'CHM' in wildcards.ASSEMBLY else wildcards.ASSEMBLY}" + "_50bp_merge_trgtdn.csv.gz",
-        annotations = lambda wildcards: "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/TRGT/from_aws/staging/catalogs/human_" + f"{wildcards.ASSEMBLY.lower() if 'CHM' in wildcards.ASSEMBLY else wildcards.ASSEMBLY}" + "_no_alt_analysis_set.palladium-v1.0.trgt.annotations.bed.gz"
+        annotations = lambda wildcards: ASSEMBLY2CATLOG[wildcards.ASSEMBLY]
     run:
         import pandas as pd
         annotations = pd.read_csv(params.annotations, sep="\t")
@@ -83,12 +91,16 @@ rule prefilter_all_loci:
         mutations = utils.filter_mutation_dataframe(mutations, 
                                                     denovo_coverage_min=0,
                                                     remove_duplicates=True,
+                                                    remove_complex=True,
                                                     depth_min=10, 
                                                     parental_overlap_frac_max=1)
+        # filter to just the homozygous sites
+        # mutations["is_homozygous"] = mutations["child_AL"].apply(lambda a: a.split(",")[0] == a.split(",")[1])
+        # mutations = mutations[mutations["is_homozygous"] == True]
         mutations["sample_id"] = wildcards.SAMPLE
         merged_mutations = mutations.merge(annotations, left_on="trid", right_on="TRid")
         # filter to homopolymers
-        # merged_mutations = merged_mutations[merged_mutations["motifs"].str.len() == 1]
+        # merged_mutations = merged_mutations[merged_mutations["motifs"].str.len() == 1].sample(100)
         merged_mutations[["sample_id", "trid", "index", "genotype", "motifs", "n_motifs", "child_AL"]].to_csv(output.fh, sep="\t", index=False)
 
 
@@ -99,10 +111,10 @@ rule validate_all_loci:
     output: "tr_validation/data/all_loci/orthogonal_support/{SAMPLE}.{ASSEMBLY}.{TECH}.read_support.csv",
     params:
         vcf = lambda wildcards: AWS_PREF + "hiphase/" + wildcards.SAMPLE + "_" + SMP2SUFF[wildcards.SAMPLE] + f"_{wildcards.ASSEMBLY.lower() if 'CHM' in wildcards.ASSEMBLY else wildcards.ASSEMBLY}" + "_50bp_merge.sorted.phased.vcf.gz",
-        kid_bam=lambda wildcards: get_bam_fh(wildcards.SAMPLE, bam_pref, bam_suff, SMP2ALT, use_alt=True if BAM_TECH != "element" else False),
-        mom_bam=lambda wildcards: get_bam_fh(SMP2MOM[wildcards.SAMPLE], bam_pref, bam_suff, SMP2ALT, use_alt=True if BAM_TECH != "element" else False) if SMP2MOM[wildcards.SAMPLE] != "missing" else None,
-        dad_bam=lambda wildcards: get_bam_fh(SMP2DAD[wildcards.SAMPLE], bam_pref, bam_suff, SMP2ALT, use_alt=True if BAM_TECH != "element" else False) if SMP2DAD[wildcards.SAMPLE] != "missing" else None,
-        max_al=lambda wildcards: 10_000 if wildcards.TECH != "element" else 120,
+        kid_bam=lambda wildcards: get_bam_fh(wildcards.SAMPLE, TECH2PREF[wildcards.TECH], TECH2SUFF[wildcards.TECH], SMP2ALT, use_alt=True if wildcards.TECH in ("ont", "hifi") else False),
+        mom_bam=lambda wildcards: get_bam_fh(SMP2MOM[wildcards.SAMPLE], TECH2PREF[wildcards.TECH], TECH2SUFF[wildcards.TECH], SMP2ALT, use_alt=True if wildcards.TECH in ("ont", "hifi") else False) if SMP2MOM[wildcards.SAMPLE] != "missing" else None,
+        dad_bam=lambda wildcards: get_bam_fh(SMP2DAD[wildcards.SAMPLE], TECH2PREF[wildcards.TECH], TECH2SUFF[wildcards.TECH], SMP2ALT, use_alt=True if wildcards.TECH in ("ont", "hifi") else False) if SMP2DAD[wildcards.SAMPLE] != "missing" else None,
+        max_al=lambda wildcards: 10_000 if wildcards.TECH in ("ont", "hifi") else 120,
     shell:
         """
         python {input.py_script} --mutations {input.kid_mutation_df} \
@@ -127,15 +139,18 @@ rule prefilter_denovos:
     run:
         import pandas as pd
         mutations = pd.read_csv(params.kid_mutation_df, sep="\t")
+        print ("####", wildcards.ASSEMBLY, mutations[mutations["child_MC"].str.contains("_")].shape)
+
         # basic filtering, only remove stuff that's not a putative de novo
         mutations = utils.filter_mutation_dataframe(mutations,
                                                     remove_complex = False,
                                                     remove_duplicates = False,
                                                     remove_gp_ev = False,
-                                                    remove_inherited = False,
+                                                    remove_inherited = True,
                                                     parental_overlap_frac_max = 1,
                                                     denovo_coverage_min = 2,
                                                     depth_min = 10,)
+        print ("####", wildcards.ASSEMBLY, mutations[mutations["child_MC"].str.contains("_")].shape)
         mutations["sample_id"] = wildcards.SAMPLE
         mutations.to_csv(output.fh, sep="\t", index=False)
 
@@ -148,12 +163,17 @@ rule merge_with_grandparental_evidence:
         ped = "tr_validation/data/file_mapping.csv"
     output:
         out = "tr_validation/data/denovos/{SAMPLE}.{ASSEMBLY}.grandparental.tsv"
+    params: 
+        vcf_pref = AWS_PREF,
+        vcf_suff = lambda wildcards: f"{wildcards.ASSEMBLY.lower() if 'CHM' in wildcards.ASSEMBLY else wildcards.ASSEMBLY}" + "_50bp_merge.sorted.vcf.gz"
     shell:
         """
         python {input.py_script} --mutations {input.kid_mutation_df} \
                                  --ped {input.ped} \
                                  --focal {wildcards.SAMPLE} \
-                                 --out {output.out}
+                                 --out {output.out} \
+                                 --vcf_pref {params.vcf_pref} \
+                                 --vcf_suff {params.vcf_suff}
         """
 
 # merge raw de novo calls with transmission evidence
@@ -163,7 +183,7 @@ rule annotate_with_transmission:
         py_script = "tr_validation/annotate_with_transmission.py",
     output: "tr_validation/data/denovos/{SAMPLE}.{ASSEMBLY}.transmission.tsv"
     params:
-        kid_transmission_df = lambda wildcards: AWS_PREF + "trgt-denovo/transmission/" + wildcards.SAMPLE + "_" + SMP2SUFF[wildcards.SAMPLE] + "_" + wildcards.ASSEMBLY + "_50bp_merge_trgtdn.transmission.csv.gz" if wildcards.SAMPLE in ("2216", "2189") else "UNK",
+        kid_transmission_df = lambda wildcards: AWS_PREF + "trgt-denovo/transmission/" + wildcards.SAMPLE + "_" + SMP2SUFF[wildcards.SAMPLE] + f"_{wildcards.ASSEMBLY.lower() if 'CHM' in wildcards.ASSEMBLY else wildcards.ASSEMBLY}" + "_50bp_merge_trgtdn.transmission." + f"{'v1' if 'CHM' in wildcards.ASSEMBLY else 'v1.T1'}" + ".csv.gz" if wildcards.SAMPLE in ("2216", "2189") else "UNK",
     shell:
         """
         python {input.py_script} --mutations {input.kid_mutation_df} \
@@ -239,7 +259,7 @@ rule calculate_grouped_denominator:
         children_sites = lambda wildcards: get_children(wildcards.SAMPLE, ped) if wildcards.SAMPLE in ("2189", "2216") else None,
         grandparent_sites = lambda wildcards: get_grandparents(wildcards.SAMPLE, ped),
         kid_unfiltered_mutation_df = lambda wildcards: AWS_PREF + "trgt-denovo/" + wildcards.SAMPLE + "_" + SMP2SUFF[wildcards.SAMPLE] + f"_{wildcards.ASSEMBLY.lower() if 'CHM' in wildcards.ASSEMBLY else wildcards.ASSEMBLY}" + "_50bp_merge_trgtdn.csv.gz",
-        annotations = lambda wildcards: "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/TRGT/from_aws/staging/catalogs/human_" + f"{wildcards.ASSEMBLY.lower() if 'CHM' in wildcards.ASSEMBLY else wildcards.ASSEMBLY}" + "_no_alt_analysis_set.palladium-v1.0.trgt.annotations.bed.gz",
+        annotations = lambda wildcards: ASSEMBLY2CATLOG[wildcards.ASSEMBLY],
     shell:
         """
         python {input.py_script} --denominator {params.kid_unfiltered_mutation_df} \
@@ -356,21 +376,20 @@ rule phase:
 
 rule phase_three_gen:
     input:
-        phased_snp_vcf = "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/deepvariant/CEPH-1463.joint.GRCh38.deepvariant.glnexus.phased.vcf.gz",
         ped = "tr_validation/data/file_mapping.csv",
         py_script = "tr_validation/phase_three_gen.py",
-        kid_mutation_df = "tr_validation/data/denovos/{SAMPLE}.GRCh38.prefiltered.tsv",
-
+        kid_mutation_df = "tr_validation/data/denovos/{SAMPLE}.{ASSEMBLY}.prefiltered.tsv",
     output:
-        out = "tr_validation/csv/phased/{SAMPLE}.GRCh38.phased.3gen.tsv"
+        out = "tr_validation/csv/phased/{SAMPLE}.{ASSEMBLY}.phased.3gen.tsv"
     params:
-        transmission_df = lambda wildcards: AWS_PREF + "trgt-denovo/transmission/" + wildcards.SAMPLE + "_" + SMP2SUFF[wildcards.SAMPLE] + "_GRCh38_50bp_merge_trgtdn.transmission.csv.gz",
+        phased_snp_vcf = lambda wildcards: "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/deepvariant/" + "CEPH-1463.joint." + f"{'chm13' if 'CHM' in wildcards.ASSEMBLY else wildcards.ASSEMBLY}" + ".deepvariant.glnexus.phased.vcf.gz",
+        transmission_df = lambda wildcards: AWS_PREF + "trgt-denovo/transmission/" + wildcards.SAMPLE + "_" + SMP2SUFF[wildcards.SAMPLE] + f"_{wildcards.ASSEMBLY.lower() if 'CHM' in wildcards.ASSEMBLY else wildcards.ASSEMBLY}" + "_50bp_merge_trgtdn.transmission.csv.gz" if wildcards.SAMPLE in ("2216", "2189") else "UNK",
         dad_id = lambda wildcards: SMP2ALT[SMP2DAD[wildcards.SAMPLE]],
         mom_id = lambda wildcards: SMP2ALT[SMP2MOM[wildcards.SAMPLE]],
         kid_id = lambda wildcards: wildcards.SAMPLE
     shell:
         """
-        python {input.py_script} --joint_snp_vcf {input.phased_snp_vcf} \
+        python {input.py_script} --joint_snp_vcf {params.phased_snp_vcf} \
                                  --focal {params.kid_id} \
                                  --out {output.out} \
                                  --mutations {input.kid_mutation_df} \

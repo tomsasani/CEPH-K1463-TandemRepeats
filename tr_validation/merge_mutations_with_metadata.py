@@ -40,6 +40,8 @@ def main(args):
     raw_plus_transmission = raw_denovos.merge(transmission_evidence)
     raw_plus_transmission_plus_grandparental = raw_plus_transmission.merge(grandparental_evidence)
 
+    #print (raw_plus_transmission_plus_grandparental[["motif"]], phasing[["motif"]])
+
     final = raw_plus_transmission_plus_grandparental.merge(phasing, how="left")
 
     final.to_csv(args.out, index=False, sep="\t")

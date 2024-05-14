@@ -260,7 +260,7 @@ def main(args):
             row_dict.update(
                 {
                     "denovo_hap_id": denovo_hap_id,
-                    "motif": motif,
+                    # "motif": motif,
                     "str_chrom": trid_chrom,
                     "denovo_al": denovo_al,
                     "non_denovo_al": orig_al,

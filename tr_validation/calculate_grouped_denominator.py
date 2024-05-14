@@ -23,6 +23,7 @@ def main(args):
             "per_allele_reads_mother": str,
             "child_coverage": int,
             "denovo_coverage": int,
+            "child_ratio": float,
             "father_overlap_coverage": str,
             "mother_overlap_coverage": str,
         }

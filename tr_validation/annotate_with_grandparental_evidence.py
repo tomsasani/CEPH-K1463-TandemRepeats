@@ -4,10 +4,7 @@ import cyvcf2
 import numpy as np
 
 
-VCF_PREF = "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/TRGT/from_aws/GRCh38_v1.0_50bp_merge/493ef25"
-VCF_SUFF = "GRCh38_50bp_merge.sorted.vcf.gz"
-
-def query_al_at_trid(trid: str, vcf: cyvcf2.VCF):
+def query_al_at_trid(trid: str, vcf: cyvcf2.VCF, min_depth: int = 10):
     chrom, start, end, _ = trid.split("_")
     region = f"{chrom}:{start}-{end}"
 
@@ -15,7 +12,7 @@ def query_al_at_trid(trid: str, vcf: cyvcf2.VCF):
     for v in vcf(region):
         if trid != v.INFO.get("TRID"): continue
         spanning_reads = v.format("SD")
-        if np.sum(spanning_reads) <= 10: continue
+        if np.sum(spanning_reads) <= min_depth: continue
         
         allele_lengths = v.format("AL")
     return allele_lengths
@@ -42,12 +39,19 @@ def annotate_with_gp(
     kid_idx = row["index"]
     denovo_al = kid_als[kid_idx]
     trid = row["trid"]
+    chrom = trid.split("_")[0]
 
     res = []
 
     for l, v in zip(("pgf", "pgm", "mgf", "mgm"), (pgf, pgm, mgf, mgm)):
         # get allele lengths at this TRID in the VCF of interest
-        v_als = query_al_at_trid(trid, v)
+        # if we're on the X chromosome, we can require min depth of 10 in the
+        # grandmothers and half that in the grandfathers
+        v_als = query_al_at_trid(
+            trid,
+            v,
+            min_depth=5 if l in ("pgf", "mgf") and chrom == "X" else 10,
+        )
         if v_als is None:
             res.append(f"{l}_?")
         else:
@@ -91,10 +95,10 @@ def main(args):
         mom_mom_suff,
     ) = [get_suffix(ped, s) for s in (dad_dad, dad_mom, mom_dad, mom_mom)]
 
-    pgf = cyvcf2.VCF(f"{VCF_PREF}/{dad_dad}_{dad_dad_suff}_{VCF_SUFF}")
-    pgm = cyvcf2.VCF(f"{VCF_PREF}/{dad_mom}_{dad_mom_suff}_{VCF_SUFF}")
-    mgf = cyvcf2.VCF(f"{VCF_PREF}/{mom_dad}_{mom_dad_suff}_{VCF_SUFF}")
-    mgm = cyvcf2.VCF(f"{VCF_PREF}/{mom_mom}_{mom_mom_suff}_{VCF_SUFF}")
+    pgf = cyvcf2.VCF(f"{args.vcf_pref}/{dad_dad}_{dad_dad_suff}_{args.vcf_suff}")
+    pgm = cyvcf2.VCF(f"{args.vcf_pref}/{dad_mom}_{dad_mom_suff}_{args.vcf_suff}")
+    mgf = cyvcf2.VCF(f"{args.vcf_pref}/{mom_dad}_{mom_dad_suff}_{args.vcf_suff}")
+    mgm = cyvcf2.VCF(f"{args.vcf_pref}/{mom_mom}_{mom_mom_suff}_{args.vcf_suff}")
 
     # read in mutations
     mutations = pd.read_csv(args.mutations, sep="\t")
@@ -110,5 +114,7 @@ if __name__ == "__main__":
     p.add_argument("--ped")
     p.add_argument("--focal")
     p.add_argument("--out")
+    p.add_argument("--vcf_pref")
+    p.add_argument("--vcf_suff")
     args = p.parse_args()
     main(args)

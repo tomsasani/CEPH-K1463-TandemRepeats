@@ -5,41 +5,57 @@ import numpy as np
 import utils
 from sklearn.mixture import GaussianMixture
 
-df = pd.read_csv("tr_validation/csv/orthogonal_support/2217.ont.read_support.csv").dropna()
-df["sample_id"] = "2217"
+ASSEMBLY = "GRCh38"
+ASSEMBLY = "CHM13v2"
+
+df = pd.read_csv(f"tr_validation/data/denovos/orthogonal_support/2189.{ASSEMBLY}.element.read_support.csv")
 df = utils.filter_mutation_dataframe(
     df,
     remove_duplicates=False,
-    remove_gp_ev=True,
+    remove_gp_ev=False,
     remove_complex=True,
+    denovo_coverage_min=2,
+    child_ratio_min=0.2,
 )
 
-# print (df.groupby(["sample", "trid"]).size().sort_values())
+df = df[df["motif"].str.len() == 1]
 
 trid = np.random.choice(df["trid"].unique())
-#trid = "chr17_80963375_80963824_trsolve"
-#trid = "chr9_40311198_40311211_TRF"
-trid = "chr9_68323850_68324860_trsolve"
 print (trid)
 df_sub = df[df["trid"] == trid]
-print (df_sub["region"].unique()[0])
-print (df_sub)
+
 df_sub["denovo_al"] = df_sub.apply(lambda row: row["child_AL"].split(",")[row["index"]], axis=1)
 df_sub["non_denovo_al"] = df_sub.apply(lambda row: row["child_AL"].split(",")[1 - row["index"]], axis=1)
 
-new = []
-for _, row in df_sub.iterrows():
-    n_reads = row["Read support"]
-    for i in range(n_reads):
-        new.append(row.to_dict())
+print (df_sub[["exp_allele_diff_denovo", "exp_allele_diff_non_denovo", "kid_evidence", "dad_evidence", "mom_evidence"]])
+assert df_sub.shape[0] == 1
 
-new = pd.DataFrame(new)
+# gather diffs in all members of the trio
+for i,row in df_sub.iterrows():
+    mom_diffs, dad_diffs, kid_diffs = [], [], []
+    for col in ("mom_evidence", "dad_evidence", "kid_evidence"):
+        for diff_count in row[col].split("|"):
+            diff, count = list(map(int, diff_count.split(":")))
+            if col == "mom_evidence":
+                mom_diffs.extend([diff] * count)
+            elif col == "dad_evidence":
+                dad_diffs.extend([diff] * count)
+            else:
+                kid_diffs.extend([diff] * count)
+
+
 # fit gaussian mixture to child's reads
-X = new[new["sample"] == "kid"]["diff"].values.reshape(-1, 1)
-gm = GaussianMixture(n_components=2).fit(X)
+X = np.array(kid_diffs)
+gm = GaussianMixture(n_components=2).fit(X.reshape(-1, 1))
+# get the means and covariance sof the two components
 mixture_means = gm.means_ 
 mixture_cov = gm.covariances_
-mixture_std = np.array([np.sqrt(np.trace(mixture_cov[i]) / 2) for i in range(2)])
+# calculate standard deviation from covariance matrix
+# standard deviation (sigma) is sqrt of the product of the residuals with themselves
+# (i.e., sqrt of the mean of the trace of the covariance matrix)
+mixture_std = np.array(
+    [np.sqrt(np.trace(mixture_cov[i]) / 2) for i in range(2)]
+)
 # figure out if either parent has a read that overlaps a normal distribution
 # centered around the child's means + stdevs
 
@@ -49,31 +65,14 @@ exp_denovo = df_sub["denovo_al"].unique()[0]
 exp_non_denovo = df_sub["non_denovo_al"].unique()[0]
 
 f, ax = plt.subplots()
-sns.stripplot(data=new, x="sample", y="diff", ax=ax)
-ax.axhline(y=exp_denovo_diff, c="firebrick", label=f"De novo (AL = {exp_denovo})")
-ax.axhline(y=exp_non_denovo_diff, c="dodgerblue", label=f"Non de novo (AL = {exp_non_denovo})")
 
-
-# keep track of how many alleles have overlap
-allele_overlap = np.zeros((2, 2))
-for allele_i in range(2):
-    mean, std = mixture_means[allele_i], 2 * mixture_std[allele_i]
-    lo, hi = mean - std, mean + std
-    ax.fill_between(x=[-0.5, 2.5], y1=lo, y2=hi, color="gainsboro", alpha=0.5)
-    ax.axhline(y=mean, c="k", ls=":")
-    for parent_i, parent in enumerate(("mom", "dad")):
-        p_diffs = df_sub[df_sub["sample"] == parent]["diff"].values
-        p_reps = df_sub[df_sub["sample"] == parent]["Read support"].values
-        print (allele_i, parent, p_reps)
-        X_p = np.repeat(p_diffs, p_reps)
-        in_parent = np.sum((X_p >= lo) & (X_p <= hi))
-        allele_overlap[allele_i, parent_i] += in_parent / np.sum(p_reps) 
-
-print (allele_overlap)
-
-ax.set_ylabel("CIGAR operations w/r/t reference")
-ax.set_xlabel("Sample in trio")
-ax.legend(frameon=False, title="Expected CIGAR operations w/r/t reference")
-ax.set_title(trid)
+sns.stripplot([kid_diffs, mom_diffs, dad_diffs], palette="colorblind", alpha=0.5)
+ax.axhline(exp_denovo_diff, ls=":", c="dodgerblue", label="Expected allele length (de novo)")
+ax.axhline(exp_non_denovo_diff, ls=":", c="firebrick", label="Expected allele length (non de novo)")
+ax.set_ylabel("Allele length inferred using Element reads")
+ax.set_xlabel("Sample")
+ax.set_xticks(range(3))
+ax.set_xticklabels(["Kid", "Mom", "Dad"])
+ax.legend()
 sns.despine(ax=ax)
-f.savefig("o.png", dpi=200)
+f.savefig('o.png', dpi=200)

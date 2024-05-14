@@ -18,7 +18,11 @@ RC = {"A": "T", "T": "A", "C": "G", "G": "C", "N": "N"}
 def read_bam(fh: str):
     # read in BAM files for this sample, as well as parents if applicable
     bam = (
-        pysam.AlignmentFile(fh, "rb" if fh.endswith("bam") else "rc")
+        pysam.AlignmentFile(
+            fh,
+            "rb" if fh.endswith("bam") else "rc",
+            #reference_filename=ref_fh if fh.endswith("cram") else None,
+        )
         if fh not in ("None", None)
         else None
     )
@@ -125,7 +129,7 @@ def main(args):
                         chrom,
                         start,
                         end,
-                        min_mapq=20,
+                        min_mapq=1,
                     )
 
                     # calculate the total number of queryable reads

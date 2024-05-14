@@ -5,6 +5,8 @@ import pandas as pd
 import pysam
 import numpy as np
 import numba
+import scipy.stats as ss
+
 
 MATCH, INS, DEL = range(3)
 OP2DIFF = {MATCH: 0, INS: 1, DEL: -1}
@@ -26,6 +28,7 @@ def al_in_parents(row: pd.Series):
     elif (denovo_al in dad_als) and (non_denovo_al in mom_als):
         return True
     else: return False
+
 
 def add_likely_de_novo_size(row: pd.Series):
     child_als = list(map(int, row["child_AL"].split(",")))
@@ -62,6 +65,7 @@ def filter_mutation_dataframe(
     remove_inherited: bool = False,
     parental_overlap_frac_max: float = 1,
     denovo_coverage_min: int = 1,
+    child_ratio_min: float = 0.,
     depth_min: int = 10,
 ):
 
@@ -75,8 +79,10 @@ def filter_mutation_dataframe(
         mutations = mutations[
             (mutations["denovo_coverage"] >= denovo_coverage_min)
         ]
+
+    mutations = mutations[mutations["child_ratio"] >= child_ratio_min]
     # only look at autosomes + X
-    mutations = mutations[~mutations["trid"].str.contains("X|Y|Un|random", regex=True)]
+    mutations = mutations[~mutations["trid"].str.contains("Y|Un|random", regex=True)]
     # remove pathogenics
     mutations = mutations[~mutations["trid"].str.contains("pathogenic")]
     # remove non-TRF/TRSOLVE
@@ -85,6 +91,9 @@ def filter_mutation_dataframe(
     mutations["denovo_al_in_parents"] = mutations.apply(lambda row: al_in_parents(row), axis=1)
     if remove_inherited:
         mutations = mutations[~mutations["denovo_al_in_parents"]]
+
+    # no parental dropout
+    mutations = mutations[(mutations["father_dropout"] == "N") & (mutations["mother_dropout"] == "N")]
 
     # annotate with depth and filter on depth
     mutations["mom_dp"] = mutations["per_allele_reads_mother"].apply(lambda a: sum(list(map(int, a.split(",")))))

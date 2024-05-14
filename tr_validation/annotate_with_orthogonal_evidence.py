@@ -58,7 +58,7 @@ def annotate_with_concordance(row: pd.Series) -> str:
 
     # figure out the observed number of distinct alleles in the kid
     n_alleles = len(set(kid_diffs))
-    if n_alleles != n_alleles_exp:
+    if n_alleles_exp > 1 and n_alleles == 1:
         return "not_ibs"
 
     # fit a Guassian mixture model to the child's allele length
