@@ -78,16 +78,21 @@ def annotate_with_concordance(row: pd.Series) -> str:
 
     # check to see if the kid's mixture components +/- STDEV overlap the expected
     # allele sizes. assume this locus passes by default.
-    overlap = True
+    overlap = 0
     for allele_i in range(n_alleles_exp):
-        mean, std = mixture_means[allele_i][0], 2 * mixture_std[allele_i]
+        # allow for 1bp off
+        mean, std = mixture_means[allele_i][0], max([2 * mixture_std[allele_i], 1])
         lo, hi = mean - std, mean + std
+        if row["region"] == "chr3:52036791-52036818":
+            print (lo, hi, denovo_al, non_denovo_al)
+            print (lo <= denovo_al <= hi, lo <= non_denovo_al <= hi)
         # if this component doesn't overlap *either* the de novo or non denovo allele,
         # set overlap to False
-        if not (lo <= denovo_al <= hi) and not (lo <= non_denovo_al <= hi):
-            overlap = False
+        if (lo <= denovo_al <= hi) or (lo <= non_denovo_al <= hi): overlap += 1
+        # if not (lo <= denovo_al <= hi) and not (lo <= non_denovo_al <= hi):
+        #     overlap = False
 
-    return "pass" if overlap else "fail"
+    return "pass" if overlap == 2 else "fail"
 
 
 def main(args):

@@ -50,7 +50,7 @@ def annotate_with_gp(
         v_als = query_al_at_trid(
             trid,
             v,
-            min_depth=5 if l in ("pgf", "mgf") and chrom == "X" else 10,
+            min_depth=5 if l in ("pgf", "mgf") and chrom in ("chrX", "chrY") else 10,
         )
         if v_als is None:
             res.append(f"{l}_?")
