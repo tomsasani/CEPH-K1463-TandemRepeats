@@ -4,7 +4,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import glob
 from annotate_with_orthogonal_evidence import annotate_with_concordance
-
+import utils
+import numpy as np
 
 plt.rc("font", size=14)
 
@@ -12,16 +13,17 @@ ASSEMBLY = "GRCh38"
 # ASSEMBLY = "CHM13v2"
 
 # read in denominators
-denom = []
-for fh in glob.glob(f"tr_validation/data/all_loci/orthogonal_support/*.{ASSEMBLY}.element.read_support.csv"):
-    df = pd.read_csv(
-        fh,
-        dtype={"sample_id": str},
-    )
-    denom.append(df)
+# denom = []
+# for fh in glob.glob(f"tr_validation/data/all_loci/orthogonal_support/*.{ASSEMBLY}.element.read_support.csv"):
+#     df = pd.read_csv(
+#         fh,
+#         dtype={"sample_id": str},
+#     )
+#     df = df[df["motif"].str.len() == 1]
+#     denom.append(df)
 
-denom = pd.concat(denom)
-print (denom.groupby("sample_id").size())
+# denom = pd.concat(denom)
+# print (denom.groupby("sample_id").size())
 
 # get mutations
 mutations = []
@@ -30,11 +32,25 @@ for fh in glob.glob(f"tr_validation/data/denovos/orthogonal_support/*.{ASSEMBLY}
         fh,
         dtype={"sample_id": str},
     )
+    # df = df[df["motif"].str.len() == 1]
+
     mutations.append(df)
 
 mutations = pd.concat(mutations)
-mutations = mutations[mutations["motif"].str.len() == 1]
+
+mutations = utils.filter_mutation_dataframe(
+    mutations,
+    remove_complex=False,
+    remove_duplicates=False,
+    remove_gp_ev=False,
+    remove_inherited=True,
+    parental_overlap_frac_max=0.1,
+    denovo_coverage_min=2,
+    child_ratio_min=0.2,
+)
+
 print (mutations.groupby("sample_id").size())
+
 
 # annotate mutations with validation status
 res = []
@@ -45,14 +61,17 @@ for i, row in mutations.iterrows():
     res.append(row_dict)
 
 res = pd.DataFrame(res)
-print (res.groupby(["sample_id", "validation_status"]).size())
+print (res[["sample_id", "region", "exp_allele_diff_denovo", "exp_allele_diff_non_denovo", "validation_status", "kid_evidence"]])#, "dad_evidence", "mom_evidence", "kid_evidence"]])
+
+
 
 f, ax = plt.subplots()
+bins = np.arange(1, 50)
 for val, val_df in res.groupby("validation_status"):
-    ax.hist(val_df["denovo_coverage"], label=val)
+    ax.hist(val_df["denovo_coverage"], bins=bins, label=val)
+ax.legend()
 f.savefig('o.png')
 
-print (res[(res["sample_id"] == "2216") & (res["validation_status"] == "pass")][["trid", "motif", "exp_allele_diff_denovo", "exp_allele_diff_non_denovo", "mom_evidence", "dad_evidence", "kid_evidence"]])
 # # annotate mutations with motif size
 # mutations["motif_size"] = mutations["motif"].apply(lambda m: len(m))
 
