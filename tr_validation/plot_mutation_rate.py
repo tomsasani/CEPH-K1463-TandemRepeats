@@ -7,7 +7,7 @@ import seaborn as sns
 import utils
 import datetime
 from collections import Counter
-import tqdm
+import scipy.stats as ss
 
 plt.rc("font", size=13)
 
@@ -26,6 +26,7 @@ mutations["has_transmission"] = mutations["sample_id"].apply(lambda s: s in ("21
 mutations["complex"] = mutations["child_MC"].str.contains("_")
 mutations["motif_size"] = mutations.apply(lambda row: len(row["motif"]) if row["complex"] is False else -1, axis=1)
 
+# print (mutations.groupby("chrom").size())
 
 REMOVE_COMPLEX = False
 FILTER_TRANSMITTED = True
@@ -37,13 +38,12 @@ mutations = utils.filter_mutation_dataframe(
     remove_duplicates=False,
     remove_gp_ev=True,
     remove_inherited=True,
-    parental_overlap_frac_max=1,
+    parental_overlap_frac_max=0.05,
     denovo_coverage_min=2,
     depth_min=10,
     child_ratio_min=0.2,
 )
 
-print (mutations.query("motif_size == -1"))
 
 # filter to sites that have transmission information if desired
 if FILTER_TRANSMITTED:
@@ -56,7 +56,6 @@ for fh in glob.glob(f"tr_validation/csv/rates/*.{ASSEMBLY}.denominator.tsv"):
     denoms.append(df)
 denoms = pd.concat(denoms)
 
-print (denoms)
 
 # remove complex loci if we're doing that
 if REMOVE_COMPLEX:
@@ -80,9 +79,11 @@ mutation_counts = (
 
 res_df = mutation_counts.merge(denoms)
 
-print (res_df)
-
 res_df["rate"] = res_df["numerator"] / res_df["denominator"]
+res_df["ci"] = res_df.apply(lambda row: 1.96 * np.sqrt(row["numerator"] / row["denominator"]), axis=1)
+res_df["ci_lo"] = res_df.apply(lambda row: (row["numerator"] - row["ci"]) / row["denominator"], axis=1)
+res_df["ci_hi"] = res_df.apply(lambda row: (row["numerator"] + row["ci"]) / row["denominator"], axis=1)
+
 
 # use poisson CIs
 res_df_grouped = res_df.groupby(["motif_size", "has_transmission"]).agg({"numerator": "sum", "denominator": "sum"}).reset_index().rename(columns={"numerator": "num_total", "denominator": "denom_total"})
@@ -147,11 +148,9 @@ ax.set_ylabel("Mutation rate\n(per locus, per generation)")
 ax.set_xlabel("Motif size (bp)")
 f.savefig("rates.poisson.png", dpi=200)
 
-print (res_df_grouped)
-
-boop = res_df.groupby("sample_id").agg({"denominator": "sum", "numerator": "sum"}).reset_index()
+boop = res_df.groupby(["sample_id", "has_transmission"]).agg({"denominator": "sum", "numerator": "sum"}).reset_index()
 boop["rate"] = boop["numerator"] / boop["denominator"]
-print (boop)
+print (boop.groupby("has_transmission").agg({"rate": ["mean", "std"]}))
 
 # plot rates across samples
 f, ax = plt.subplots(figsize=(12, 5))
@@ -159,17 +158,21 @@ f, ax = plt.subplots(figsize=(12, 5))
 x, y = "motif_size", "rate"
 palette = {True: "goldenrod", False: "cornflowerblue"}
 
-print (res_df.groupby("motif_size").size())
+res_df_grouped = res_df.groupby(["motif_size", "has_transmission"]).agg({"rate": ["mean", lambda r: np.std(r)]}).reset_index()
+res_df_grouped.columns = ["motif_size", "has_transmission", "rate", "stdev"]
 
-sns.lineplot(
-    data=res_df.query("motif_size >= 1"),
-    x=x,
-    y=y,
-    # hue="has_transmission",
-    errorbar=("ci", 95),
-    ax=ax,
-    palette=palette,
-)
+params = {"linestyle": "-", "capthick":1, "ms":8, "capsize":2, "mec":"w", "fmt":"o"}
+
+for tm, tm_df in res_df_grouped.query("motif_size >= 1 and motif_size <= 100").groupby("has_transmission"):
+    ax.errorbar(
+        tm_df["motif_size"],
+        tm_df["rate"],
+        yerr=tm_df["stdev"],
+        c=palette[tm],
+        mfc=palette[tm],
+        **params,
+        label=f"Transmitted" if tm else f"Not transmitted",
+    )
 
 # create inset ax
 ax_strs = inset_axes(
@@ -180,29 +183,24 @@ ax_strs = inset_axes(
     axes_kwargs={"yscale": "log"},
 )
 
-sns.lineplot(
-    data=res_df.query("motif_size <= 6 and motif_size >= 1"),
-    x=x,
-    y=y,
-    # hue="has_transmission",
-    errorbar=("ci", 95),
-    ax=ax_strs,
-    palette=palette,
-)
+for tm, tm_df in res_df_grouped.query("motif_size >= 1 and motif_size <= 6").groupby("has_transmission"):
+    ax_strs.errorbar(tm_df["motif_size"], tm_df["rate"], yerr=tm_df["stdev"], c=palette[tm], mfc=palette[tm], **params)
+
 
 ax_strs.set_xlabel("Motif size (bp)")
 ax_strs.set_ylabel(None)
 # ax_strs.get_legend().remove()
 
 # add watermark
-now = datetime.datetime.now()
-ax.text(0.5, 0.5, f"draft ({str(now).split(' ')[0]})", transform=ax.transAxes,
-        fontsize=20, color='gray', alpha=0.25,
-        ha='center', va='center', rotation=30)
+# now = datetime.datetime.now()
+# ax.text(0.5, 0.5, f"draft ({str(now).split(' ')[0]})", transform=ax.transAxes,
+#         fontsize=20, color='gray', alpha=0.25,
+#         ha='center', va='center', rotation=30)
 
 ax.set_yscale("log")
-ax.set_ylabel("Mutation rate\n(per locus, per generation)")
+ax.set_ylabel("Mutation rate\n(per locus, per generation)\n+/- STDEV")
 ax.set_xlabel("Motif size (bp)")
-# ax.legend(fancybox=True, shadow=True, title="Validated via transmission to G4?")
+ax.legend(fancybox=True, shadow=True, title="Validated via transmission to G4?")
 sns.despine(ax=ax)
 f.savefig("rates.png", dpi=200)
+f.savefig("rates.pdf")

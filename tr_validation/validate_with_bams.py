@@ -79,8 +79,16 @@ def main(args):
             assert denovo_idx in (0, 1)
 
             allele_lengths = list(map(int, row_dict["child_AL"].split(",")))
+
             denovo_al = allele_lengths[denovo_idx]
-            non_denovo_al = allele_lengths[1 - denovo_idx]
+            non_denovo_al = None
+
+            # if we're on a male X, there's only one AL
+            is_male_x = chrom == "chrX" and row_dict["suffix"].startswith("S")
+            if is_male_x:
+                non_denovo_al = 1 * denovo_al
+            else:
+                non_denovo_al = allele_lengths[1 - denovo_idx]
 
             # loop over VCF
             for var in vcf(region):
@@ -129,7 +137,7 @@ def main(args):
                         chrom,
                         start,
                         end,
-                        min_mapq=1,
+                        min_mapq=20,
                     )
 
                     # calculate the total number of queryable reads

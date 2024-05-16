@@ -37,7 +37,7 @@ PED_FILE = "tr_validation/data/file_mapping.csv"
 ped = pd.read_csv(PED_FILE, sep=",", dtype={"paternal_id": str, "maternal_id": str, "sample_id": str})
 
 ASSEMBLY = "GRCh38"
-# ASSEMBLY = "CHM13v2"
+ASSEMBLY = "CHM13v2"
 BAM_TECH = "element"
 
 TECH2PREF = {"ont": f"/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/ont-bams/{ASSEMBLY.split('v2')[0]}/", 
@@ -47,7 +47,7 @@ TECH2PREF = {"ont": f"/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Pal
 TECH2SUFF = {"ont": ".minimap2.bam", 
              "element": f"-E.{ASSEMBLY.split('v2')[0]}.merged.sort.bam",
              "illumina": ".cram",
-             "hifi": f".{ASSEMBLY.split('v2')[0].lower() if 'CHM' in ASSEMBLY else ASSEMBLY.split('v2')[0]}.haplotagged.bam"}
+             "hifi": f".{ASSEMBLY.split('v2')[0].lower() if 'CHM' in ASSEMBLY else ASSEMBLY.split('v2')[0]}.haplotagged.bam",}
 
 ILLUMINA_REF = "/scratch/ucgd/lustre/common/data/Reference/GRCh38/human_g1k_v38_decoy_phix.fasta"
 
@@ -93,7 +93,7 @@ rule prefilter_all_loci:
                                                     remove_duplicates=True,
                                                     remove_complex=True,
                                                     depth_min=10, 
-                                                    parental_overlap_frac_max=1)
+                                                    parental_overlap_frac_max=1,)
         # filter to just the homozygous sites
         # mutations["is_homozygous"] = mutations["child_AL"].apply(lambda a: a.split(",")[0] == a.split(",")[1])
         # mutations = mutations[mutations["is_homozygous"] == True]
@@ -131,15 +131,29 @@ rule validate_all_loci:
 
 rule prefilter_denovos:
     input:
-        "tr_validation/utils.py"
+        py_script = "tr_validation/utils.py",
+        ped = "tr_validation/data/file_mapping.csv",
+
     output: 
         fh = "tr_validation/data/denovos/{SAMPLE}.{ASSEMBLY}.prefiltered.tsv"
     params:
         kid_mutation_df = lambda wildcards: AWS_PREF + "trgt-denovo/" + wildcards.SAMPLE + "_" + SMP2SUFF[wildcards.SAMPLE] + f"_{wildcards.ASSEMBLY.lower() if 'CHM' in wildcards.ASSEMBLY else wildcards.ASSEMBLY}" + "_50bp_merge_trgtdn.csv.gz",
     run:
         import pandas as pd
-        mutations = pd.read_csv(params.kid_mutation_df, sep="\t")
-        print ("####", wildcards.ASSEMBLY, mutations[mutations["child_MC"].str.contains("_")].shape)
+        mutations = pd.read_csv(params.kid_mutation_df, sep="\t", dtype={"child_AL": str, 
+                                                                         "mother_AL": str, 
+                                                                         "father_AL": str, 
+                                                                         "per_allele_reads_mother": str, 
+                                                                         "per_allele_reads_father": str, 
+                                                                         "per_allele_reads_child": str,
+                                                                         "father_overlap_coverage": str,
+                                                                         "mother_overlap_coverage": str})
+        mutations["sample_id"] = wildcards.SAMPLE
+        print ("############", mutations[mutations["trid"].str.startswith("chrY")])
+
+        file_mapping = pd.read_csv(input.ped, dtype={"sample_id": str})
+        mutations = mutations.merge(file_mapping)
+        print (mutations.columns)
 
         # basic filtering, only remove stuff that's not a putative de novo
         mutations = utils.filter_mutation_dataframe(mutations,
@@ -148,8 +162,9 @@ rule prefilter_denovos:
                                                     remove_gp_ev = False,
                                                     remove_inherited = True,
                                                     parental_overlap_frac_max = 1,
-                                                    denovo_coverage_min = 2,
+                                                    denovo_coverage_min = 1,
                                                     depth_min = 10,)
+
         print ("####", wildcards.ASSEMBLY, mutations[mutations["child_MC"].str.contains("_")].shape)
         mutations["sample_id"] = wildcards.SAMPLE
         mutations.to_csv(output.fh, sep="\t", index=False)
@@ -183,7 +198,7 @@ rule annotate_with_transmission:
         py_script = "tr_validation/annotate_with_transmission.py",
     output: "tr_validation/data/denovos/{SAMPLE}.{ASSEMBLY}.transmission.tsv"
     params:
-        kid_transmission_df = lambda wildcards: AWS_PREF + "trgt-denovo/transmission/" + wildcards.SAMPLE + "_" + SMP2SUFF[wildcards.SAMPLE] + f"_{wildcards.ASSEMBLY.lower() if 'CHM' in wildcards.ASSEMBLY else wildcards.ASSEMBLY}" + "_50bp_merge_trgtdn.transmission." + f"{'v1' if 'CHM' in wildcards.ASSEMBLY else 'v1.T1'}" + ".csv.gz" if wildcards.SAMPLE in ("2216", "2189") else "UNK",
+        kid_transmission_df = lambda wildcards: AWS_PREF + "trgt-denovo/transmission/" + wildcards.SAMPLE + "_" + SMP2SUFF[wildcards.SAMPLE] + f"_{wildcards.ASSEMBLY.lower() if 'CHM' in wildcards.ASSEMBLY else wildcards.ASSEMBLY}" + "_50bp_merge_trgtdn.transmission." + f"{'T1' if 'CHM' in wildcards.ASSEMBLY else 'v1.T1'}" + ".csv.gz" if wildcards.SAMPLE in ("2216", "2189") else "UNK",
     shell:
         """
         python {input.py_script} --mutations {input.kid_mutation_df} \
@@ -257,7 +272,7 @@ rule calculate_grouped_denominator:
     output: "tr_validation/csv/rates/{SAMPLE}.{ASSEMBLY}.denominator.tsv"
     params:
         children_sites = lambda wildcards: get_children(wildcards.SAMPLE, ped) if wildcards.SAMPLE in ("2189", "2216") else None,
-        grandparent_sites = lambda wildcards: get_grandparents(wildcards.SAMPLE, ped),
+        # grandparent_sites = lambda wildcards: get_grandparents(wildcards.SAMPLE, ped),
         kid_unfiltered_mutation_df = lambda wildcards: AWS_PREF + "trgt-denovo/" + wildcards.SAMPLE + "_" + SMP2SUFF[wildcards.SAMPLE] + f"_{wildcards.ASSEMBLY.lower() if 'CHM' in wildcards.ASSEMBLY else wildcards.ASSEMBLY}" + "_50bp_merge_trgtdn.csv.gz",
         annotations = lambda wildcards: ASSEMBLY2CATLOG[wildcards.ASSEMBLY],
     shell:
@@ -267,7 +282,6 @@ rule calculate_grouped_denominator:
                                  --out {output} \
                                  --sample_id {wildcards.SAMPLE} \
                                 -children_sites {params.children_sites} \
-                                -grandparent_sites {params.grandparent_sites}
 
         """
 
@@ -309,7 +323,7 @@ rule combine_trio_vcfs:
         dad_phased_snp_vcf = lambda wildcards: AWS_PREF + "hiphase/" + SMP2ALT[SMP2DAD[wildcards.SAMPLE]] + f".{ASSEMBLY.lower() if 'CHM' in ASSEMBLY else ASSEMBLY}.deepvariant.glnexus.phased.vcf.gz",
         mom_phased_snp_vcf = lambda wildcards: AWS_PREF + "hiphase/" + SMP2ALT[SMP2MOM[wildcards.SAMPLE]] + f".{ASSEMBLY.lower() if 'CHM' in ASSEMBLY else ASSEMBLY}.deepvariant.glnexus.phased.vcf.gz",
     output:
-        temp("tr_validation/data/vcf/{SAMPLE}.{ASSEMBLY}.trio.vcf.gz")
+        "tr_validation/data/vcf/{SAMPLE}.{ASSEMBLY}.trio.vcf.gz"
     threads: 4
     shell:
         """
@@ -319,7 +333,7 @@ rule combine_trio_vcfs:
                        --threads 4 \
                        | \
         bcftools view -m2 -M2 \
-                       --include 'INFO/AN == 6' \
+                       --include 'INFO/AN >= 4' \
                        -o {output} \
                        -Oz \
         """
@@ -327,7 +341,7 @@ rule combine_trio_vcfs:
 
 rule index_trio_vcf:
     input: "tr_validation/data/vcf/{SAMPLE}.trio.vcf.gz"
-    output: temp("tr_validation/data/vcf/{SAMPLE}.trio.vcf.gz.csi")
+    output: "tr_validation/data/vcf/{SAMPLE}.trio.vcf.gz.csi"
 
     shell:
         """
@@ -344,6 +358,8 @@ rule annotate_with_informative_sites:
     output:
         out = "tr_validation/csv/phased/{SAMPLE}.{ASSEMBLY}.annotated.2gen.tsv"
     params:
+        # phased_snp_vcf = lambda wildcards: "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/deepvariant/CEPH-1463.joint." + f"{'chm13' if 'CHM' in wildcards.ASSEMBLY else 'GRCh38'}" + ".deepvariant.glnexus.phased.vcf.gz",
+        # phased_snp_vcf_idx = lambda wildcards: "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/deepvariant/CEPH-1463.joint." + f"{'chm13' if 'CHM' in wildcards.ASSEMBLY else 'GRCh38'}" + ".deepvariant.glnexus.phased.vcf.gz.tbi",
         kid_phased_str_vcf = lambda wildcards: AWS_PREF + "hiphase/" + wildcards.SAMPLE + "_" + SMP2SUFF[wildcards.SAMPLE] + f"_{ASSEMBLY.lower() if 'CHM' in ASSEMBLY else ASSEMBLY}_50bp_merge.sorted.phased.vcf.gz",
         dad_id = lambda wildcards: SMP2ALT[SMP2DAD[wildcards.SAMPLE]],
         mom_id = lambda wildcards: SMP2ALT[SMP2MOM[wildcards.SAMPLE]],

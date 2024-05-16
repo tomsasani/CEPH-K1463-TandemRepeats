@@ -1,11 +1,9 @@
 from collections import Counter
-from typing import Tuple, Union, Dict, List
+from typing import Tuple, Union, List
 import pandas as pd
 
 import pysam
 import numpy as np
-import numba
-import scipy.stats as ss
 
 
 MATCH, INS, DEL = range(3)
@@ -18,44 +16,56 @@ def al_in_parents(row: pd.Series):
     child_als = row["child_AL"].split(",")
     # denovo idx
     denovo_idx = int(row["index"])
-    non_denovo_idx = 1 - denovo_idx
-    denovo_al, non_denovo_al = child_als[denovo_idx], child_als[non_denovo_idx]
 
     mom_als, dad_als = row["mother_AL"].split(","), row["father_AL"].split(",")
 
-    if (denovo_al in mom_als) and (non_denovo_al in dad_als):
-        return True
-    elif (denovo_al in dad_als) and (non_denovo_al in mom_als):
-        return True
-    else: return False
+    # if we're on a male X, there's only one haplotype so the "non-denovo idx"
+    # is not applicable. we only have to ask if the denovo AL is among the mom's ALs
+    if row["suffix"].startswith("S") and row["trid"].split("_")[0] in ("chrX", "chrY"):
+        denovo_al = child_als[denovo_idx]
+        if denovo_al in mom_als: return True
+        else: return False
+
+    else:
+        non_denovo_idx = 1 - denovo_idx
+        try:
+            denovo_al, non_denovo_al = child_als[denovo_idx], child_als[non_denovo_idx]
+        except IndexError: print (child_als, row["trid"], row["suffix"])
+        if (denovo_al in mom_als) and (non_denovo_al in dad_als):
+            return True
+        elif (denovo_al in dad_als) and (non_denovo_al in mom_als):
+            return True
+        else: return False
 
 
 def add_likely_de_novo_size(row: pd.Series):
+
     child_als = list(map(int, row["child_AL"].split(",")))
     # denovo idx
     denovo_idx = int(row["index"])
-    non_denovo_idx = 1 - denovo_idx
-    denovo_al, non_denovo_al = child_als[denovo_idx], child_als[non_denovo_idx]
+    denovo_al = child_als[denovo_idx]
 
-    mom_als, dad_als = list(map(int, row["mother_AL"].split(","))), list(map(int, row["father_AL"].split(",")))
+    if not row["trid"].startswith("chrX"):
+        non_denovo_idx = 1 - denovo_idx
+        non_denovo_al = child_als[non_denovo_idx]
 
-    # if the child's non-denovo AL is in dad and not in mom, the de novo AL
-    # probably came from mom
-    if (non_denovo_al in dad_als) and (non_denovo_al not in mom_als):
-        denovo_diffs = np.array([denovo_al - al for al in mom_als])
-        min_diff_idx = np.argmin(denovo_diffs)
-        # likely original AL
-        return denovo_diffs[min_diff_idx]
-    # if the child's non-denovo AL is in mom but not in dad, the de novo AL
-    # probably came from dad
-    elif (denovo_al in dad_als) and (non_denovo_al in mom_als):
-        denovo_diffs = np.array([denovo_al - al for al in dad_als])
-        min_diff_idx = np.argmin(denovo_diffs)
-        # likely original AL
-        return denovo_diffs[min_diff_idx]
-    else: 
-        # otherwise, we can't know
+    # figure out the inferred phase of the site, if not unknown
+    phase = row["phase_summary"].split(":")[0]
+
+    if phase == "unknown":
         return np.nan
+
+    else:
+        if phase == "dad":
+            parent_als = list(map(int, row["father_AL"].split(",")))
+        elif phase == "mom":
+            parent_als = list(map(int, row["mother_AL"].split(",")))
+
+        abs_denovo_diffs = np.array([abs(denovo_al - al) for al in parent_als])
+        denovo_diffs = np.array([denovo_al - al for al in parent_als])
+        min_diff_idx = np.argmin(abs_denovo_diffs)
+        # likely original AL
+        return denovo_diffs[min_diff_idx]
 
 def filter_mutation_dataframe(
     mutations: pd.DataFrame,
@@ -82,18 +92,22 @@ def filter_mutation_dataframe(
 
     mutations = mutations[mutations["child_ratio"] >= child_ratio_min]
     # only look at autosomes + X
-    mutations = mutations[~mutations["trid"].str.contains("Y|Un|random", regex=True)]
+    mutations = mutations[~mutations["trid"].str.contains("Un|random", regex=True)]
     # remove pathogenics
     mutations = mutations[~mutations["trid"].str.contains("pathogenic")]
     # remove non-TRF/TRSOLVE
     mutations = mutations[mutations["trid"].str.contains("trsolve|TRF", regex=True)]
-    # remove sites where de novo AL is observed in a parent
-    mutations["denovo_al_in_parents"] = mutations.apply(lambda row: al_in_parents(row), axis=1)
-    if remove_inherited:
-        mutations = mutations[~mutations["denovo_al_in_parents"]]
 
-    # no parental dropout
-    mutations = mutations[(mutations["father_dropout"] == "N") & (mutations["mother_dropout"] == "N")]
+
+    # remove sites where de novo AL is observed in a parent if we're interested
+    # in filtering DNMs
+    if denovo_coverage_min > 0:
+        mutations["denovo_al_in_parents"] = mutations.apply(lambda row: al_in_parents(row), axis=1)
+        if remove_inherited:
+            mutations = mutations[~mutations["denovo_al_in_parents"]]
+
+        # no parental dropout, only when we filter DNMs
+        mutations = mutations[(mutations["father_dropout"] == "N") & (mutations["mother_dropout"] == "N")]
 
     # annotate with depth and filter on depth
     mutations["mom_dp"] = mutations["per_allele_reads_mother"].apply(lambda a: sum(list(map(int, a.split(",")))))
@@ -124,7 +138,7 @@ def filter_mutation_dataframe(
     if remove_gp_ev and "gp_ev" in mutations.columns:
         mutations = mutations[~mutations["gp_ev"].str.contains("Y")]
 
-    mutations["denovo_size"] = mutations.apply(lambda row: add_likely_de_novo_size(row), axis=1)
+    # mutations["denovo_size"] = mutations.apply(lambda row: add_likely_de_novo_size(row), axis=1)
 
     return mutations
 

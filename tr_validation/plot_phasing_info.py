@@ -29,17 +29,20 @@ for fh in glob.glob(f"tr_validation/csv/filtered_and_merged/*.{ASSEMBLY}.tsv"):
     mutations.append(df)
 mutations = pd.concat(mutations).fillna({"children_with_denovo_allele": "unknown", "phase_summary": "unknown"})
 
+mutations = mutations[mutations["paternal_id"] == 2209]
+
 mutations = filter_mutation_dataframe(
     mutations,
     remove_complex=False,
     remove_duplicates=False,
     remove_gp_ev=False,
     remove_inherited=True,
-    parental_overlap_frac_max=1,
+    parental_overlap_frac_max=0.05,
     denovo_coverage_min=2,
     depth_min=10,
     child_ratio_min=0.2,
 )
+
 mutations["pass_inf_sites"] = mutations.apply(
     lambda row: (
         ((float(row["n_upstream"]) > 1) | (float(row["n_downstream"]) > 1))
@@ -67,6 +70,9 @@ mutations["phase"] = mutations["phase_summary"].apply(lambda p: p.split(":")[0])
 # mutations = mutations[mutations["phase"] != "unknown"]
 
 phase_counts = calculate_phase_counts(mutations, group_cols=["sample_id", "phase"])
+
+print (phase_counts)
+print (phase_counts.query("phase == 'dad'")["fraction"].mean(), phase_counts.query("phase == 'dad'")["fraction"].std())
 ages = pd.read_csv("tr_validation/data/k20_parental_age_at_birth.csv", dtype={"sample_id": str, "UGRP Lab ID (archive)": str})
 
 order = phase_counts.groupby("sample_id").agg({"count": "sum"}).sort_values("count").reset_index()["sample_id"].to_list()
