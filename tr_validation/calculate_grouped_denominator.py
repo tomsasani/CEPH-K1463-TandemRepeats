@@ -69,13 +69,13 @@ def main(args):
 
     # NOTE: if we are filtering on grandparental evidence, we need to adjust the denominator to
     # only include sites with >= 10 reads in the G3 individuals' grandparents.
-    insufficient_depth_sites = []
-    for fh in args.grandparent_sites:
-        df = pd.read_csv(fh, sep="\t")
-        trids = df["trid"].to_list()
-        insufficient_depth_sites.extend(trids)
-    insufficient_depth_sites = list(set(insufficient_depth_sites))
-    raw_loci = raw_loci[~raw_loci["trid"].isin(insufficient_depth_sites)]
+    # insufficient_depth_sites = []
+    # for fh in args.grandparent_sites:
+    #     df = pd.read_csv(fh, sep="\t")
+    #     trids = df["trid"].to_list()
+    #     insufficient_depth_sites.extend(trids)
+    # insufficient_depth_sites = list(set(insufficient_depth_sites))
+    # raw_loci = raw_loci[~raw_loci["trid"].isin(insufficient_depth_sites)]
 
     raw_loci["chrom"] = raw_loci["trid"].apply(lambda t: t.split("_")[0])
 

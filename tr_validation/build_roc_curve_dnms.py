@@ -94,7 +94,7 @@ def main():
         remove_duplicates=False,
         remove_gp_ev=False,
         parental_overlap_frac_max=1,
-        denovo_coverage_min=2,
+        denovo_coverage_min=1,
     )
 
     print (mutations)
