@@ -65,39 +65,20 @@ def main():
     )
 
     # read in mutations
+    ASSEMBLY = "CHM13v2"
     ASSEMBLY = "GRCh38"
     mutations = []
-    for fh in glob.glob(f"tr_validation/data/denovos/orthogonal_support/*.{ASSEMBLY}.element.read_support.csv"):
+    for fh in glob.glob(f"tr_validation/csv/orthogonal_support/*.{ASSEMBLY}.element.tsv"):
         df = pd.read_csv(
             fh,
+            sep="\t",
             dtype={"sample_id": str},
         )
-        res = []
-        for i, row in df.iterrows():
-            row_dict = row.to_dict()
-            parental_overlap = annotate_with_concordance(row)
-            row_dict.update({"validation_status": parental_overlap})
-            res.append(row_dict)
-
-        res = pd.DataFrame(res)
-        mutations.append(res)
+        mutations.append(df)
 
     mutations = pd.concat(mutations)
     print (mutations)
     
-    # if we're looking at de novos, ensure that we filter
-    # the DataFrame to exclude the non-denovo candidates
-    # remove denovos where allele size is unchanged
-    mutations = filter_mutation_dataframe(
-        mutations,
-        remove_complex=False,
-        remove_duplicates=False,
-        remove_gp_ev=False,
-        parental_overlap_frac_max=1,
-        denovo_coverage_min=1,
-    )
-
-    print (mutations)
     # add parental depth columns
     mutations["mom_dp"] = mutations["per_allele_reads_mother"].apply(
         lambda a: get_dp(a)
@@ -112,8 +93,8 @@ def main():
     mutations["father_overlap_coverage"] = mutations["father_overlap_coverage"].apply(lambda f: get_dp(f))
     mutations["mother_overlap_coverage"] = mutations["mother_overlap_coverage"].apply(lambda f: get_dp(f))
     mutations["denovo_al"] = mutations.apply(lambda row: int(row["child_AL"].split(",")[row["index"]]), axis=1)
-    # mutations["is_transmitted"] = mutations["children_with_denovo_allele"].apply(lambda c: c != "unknown")
     mutations["is_validated"] = mutations["validation_status"].apply(lambda p: 1 if p == "pass" else 0)
+    mutations["is_phased"] = mutations["phase_summary"] != "unknown"
 
     FEATURES = [
         "child_ratio",
@@ -131,7 +112,7 @@ def main():
     CLASSIFICATION = "is_validated"
 
     if CLASSIFICATION == "is_validated":
-        mutations = mutations[mutations["validation_status"] != "no_element_data"]
+        mutations = mutations[mutations["validation_status"] != "no_data"]
 
     candidates = mutations["trid"].nunique()
     print(f"{candidates} loci that are candidate DNMs")
