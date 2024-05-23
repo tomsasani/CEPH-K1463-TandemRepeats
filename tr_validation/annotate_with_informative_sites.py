@@ -216,7 +216,6 @@ def main(args):
     CHROMS.extend(["chrX", "chrY"])
 
     mutations = pd.read_csv(args.mutations, sep="\t")
-    print (f"Total of {mutations.shape[0]} DNMs")
 
     # mutations = mutations[mutations["trid"] == "chr11_28449532_28449720_trsolve"]
 
@@ -340,9 +339,6 @@ def main(args):
 
     dnm_phases = pd.DataFrame(dnm_phases)
 
-    print ("### PHASED ###", dnm_phases.shape)
-    print ("### INFORMATIVE SITES ###", informative_sites.shape)
-
     # merge de novo STR information with informative site information.
     # it's critical to ensure that we only merge STRs with informative sites
     # that share the same phase block (PS) tag, so that we can use phased
@@ -360,10 +356,8 @@ def main(args):
     merged_dnms_inf["str_midpoint"] = merged_dnms_inf["trid"].apply(lambda t: np.mean(list(map(int, t.split("_")[1:-1]))))
     merged_dnms_inf["diff_to_str"] = merged_dnms_inf["inf_pos"] - merged_dnms_inf["str_midpoint"]
     merged_dnms_inf["abs_diff_to_str"] = np.abs(merged_dnms_inf["diff_to_str"])
-    print ("### MERGED ###", merged_dnms_inf["trid"].nunique())
 
     merged_dnms_inf_consistent = measure_consistency(merged_dnms_inf, "haplotype_A_origin")
-    print ("### MERGED CONSISTENT ###", merged_dnms_inf_consistent["trid"].nunique())
 
     # now that we have a consistent set of informative sites surrounding the STR,
     # infer parent of origin for the haplotype that carries the de novo allele.
