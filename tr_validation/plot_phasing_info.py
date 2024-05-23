@@ -29,19 +29,7 @@ for fh in glob.glob(f"tr_validation/csv/filtered_and_merged/*.{ASSEMBLY}.tsv"):
     mutations.append(df)
 mutations = pd.concat(mutations).fillna({"children_with_denovo_allele": "unknown", "phase_summary": "unknown"})
 
-mutations = mutations[mutations["paternal_id"] == 2209]
-
-mutations = filter_mutation_dataframe(
-    mutations,
-    remove_complex=False,
-    remove_duplicates=False,
-    remove_gp_ev=False,
-    remove_inherited=True,
-    parental_overlap_frac_max=0.05,
-    denovo_coverage_min=2,
-    depth_min=10,
-    child_ratio_min=0.2,
-)
+mutations = mutations.query("denovo_coverage >= 5")
 
 mutations["pass_inf_sites"] = mutations.apply(
     lambda row: (
@@ -67,7 +55,9 @@ mutations["dad_sample_id"] = mutations["sample_id"].apply(lambda s: sample2dad[s
 mutations["phase"] = mutations["phase_summary"].apply(lambda p: p.split(":")[0])
 
 # remove unphased
-# mutations = mutations[mutations["phase"] != "unknown"]
+REMOVE_UNPHASED = False
+if REMOVE_UNPHASED:
+    mutations = mutations[mutations["phase"] != "unknown"]
 
 phase_counts = calculate_phase_counts(mutations, group_cols=["sample_id", "phase"])
 
@@ -110,13 +100,10 @@ ax.set_xlabel("Number of phased TR DNMs")
 ax.legend(title="Parent-of-origin", fancybox=True, shadow=True, bbox_to_anchor=(0.75, 0.35), fontsize=12)
 sns.despine(ax=ax, left=True)
 
-now = datetime.datetime.now()
-ax.text(0.5, 0.5, f"draft ({str(now).split(' ')[0]})", transform=ax.transAxes,
-        fontsize=20, color='gray', alpha=0.25,
-        ha='center', va='center', rotation=30)
 
 f.tight_layout()
-f.savefig("phase.png", dpi=200)
+f.savefig(f"phase.{ASSEMBLY}.{'only_phased' if REMOVE_UNPHASED else ''}.png", dpi=200)
+f.savefig(f"phase.{ASSEMBLY}.{'only_phased' if REMOVE_UNPHASED else ''}.pdf")
 
 
 # df['min_parent_support'] = df[['mom_min_support', 'dad_min_support']].min(axis=1)

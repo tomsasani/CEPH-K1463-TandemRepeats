@@ -79,6 +79,7 @@ def main():
         off_arr = off[tech_i, :]
         seen_arr = seen[tech_i, :]
         seen_idxs = np.where(np.sum(seen_arr, axis=1))[0]
+        print (tech, seen_idxs.shape)
         off_arr_tech = off_arr[seen_idxs, :]
         print (tech, np.mean(off_arr_tech[:, MAX_OFFSET]), np.std(off_arr_tech[:, MAX_OFFSET]))
         ci_lo, ci_hi = bootstrap(off_arr_tech)

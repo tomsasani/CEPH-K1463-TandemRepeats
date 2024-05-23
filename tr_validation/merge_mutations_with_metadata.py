@@ -1,14 +1,7 @@
 import pandas as pd
-from utils import filter_mutation_dataframe
-import matplotlib.pyplot as plt
-import seaborn as sns
-import numpy as np
-import seaborn.objects as so
-import tqdm 
-from mpl_toolkits.axes_grid1.inset_locator import mark_inset, zoomed_inset_axes, inset_axes
-import glob 
 import argparse
 
+import utils
 
 def main(args):
     raw_denovos = pd.read_csv(
@@ -41,10 +34,12 @@ def main(args):
     raw_plus_transmission_plus_grandparental = raw_plus_transmission.merge(grandparental_evidence)
 
 
-    final = raw_plus_transmission_plus_grandparental.merge(phasing, how="left")
+    final = raw_plus_transmission_plus_grandparental.merge(phasing, how="left").fillna({"phase_summary": "unknown"})
+
+    final["likely_denovo_size"] = final.apply(lambda row: utils.add_likely_de_novo_size(row), axis=1)
 
     final.to_csv(args.out, index=False, sep="\t")
-    print (raw_denovos.shape, transmission_evidence.shape,final.shape)
+    print (raw_denovos.shape, transmission_evidence.shape, final.shape)
 
 
 if __name__ == "__main__":
