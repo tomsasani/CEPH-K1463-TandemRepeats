@@ -1,0 +1,11 @@
+numpy
+snakemake
+pandas
+matplotlib
+seaborn
+cyvcf2
+scikit-learn
+pysam
+tqdm
+pandera
+pulp==2.7.0
