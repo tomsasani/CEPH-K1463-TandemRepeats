@@ -38,7 +38,6 @@ ped = pd.read_csv(PED_FILE, sep=",", dtype={"paternal_id": str, "maternal_id": s
 
 ASSEMBLY = "GRCh38"
 ASSEMBLY = "CHM13v2"
-BAM_TECH = "element"
 
 TECH2PREF = {"ont": f"/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/ont-bams/{ASSEMBLY.split('v2')[0]}/", 
              "element": f"/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/element/{ASSEMBLY.split('v2')[0]}_bams/",
@@ -54,15 +53,18 @@ ILLUMINA_REF = "/scratch/ucgd/lustre/common/data/Reference/GRCh38/human_g1k_v38_
 ASSEMBLY2CATLOG = {"GRCh38": "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/TRGT/from_aws/staging/catalogs/human_GRCh38_no_alt_analysis_set.palladium-v1.0.trgt.annotations.bed.gz",
                    "CHM13v2": "/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/TRGT/from_aws/staging/catalogs/chm13v2.0_maskedY_rCRS.palladium-v1.0.trgt.annotations.bed.gz"}
 
-bam_pref, bam_suff = TECH2PREF[BAM_TECH], TECH2SUFF[BAM_TECH]
-
 SMP2ALT = dict(zip(ped["sample_id"], ped["alt_sample_id"]))
 SMP2SUFF = dict(zip(ped["sample_id"].to_list(), ped["suffix"].to_list()))
 SMP2DAD = dict(zip(ped["sample_id"].to_list(), ped["paternal_id"].to_list()))
 SMP2MOM = dict(zip(ped["sample_id"].to_list(), ped["maternal_id"].to_list()))
 
 SAMPLES = ped[ped["paternal_id"] == "2209"]["sample_id"].to_list()
+PARENTS = ["2209", "2188"]
+# SAMPLES = ["2189"]
+CHILDREN = ped[ped["paternal_id"] != "missing"]["sample_id"].to_list()
+# CHILDREN = ["2189"]
 ALL_SAMPLES = ped["sample_id"].to_list()
+
 
 AWS_PREF = f"/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/TRGT/from_aws/{ASSEMBLY}_v1.0_50bp_merge/493ef25/"
 
@@ -71,15 +73,20 @@ rule all:
         expand("tr_validation/csv/filtered_and_merged/{SAMPLE}.{ASSEMBLY}.tsv", SAMPLE=SAMPLES, ASSEMBLY=[ASSEMBLY]),
         expand("tr_validation/csv/rates/{SAMPLE}.{ASSEMBLY}.denominator.tsv", SAMPLE=SAMPLES, ASSEMBLY=[ASSEMBLY]),
         expand("tr_validation/csv/phased/{SAMPLE}.{ASSEMBLY}.phased.3gen.tsv", SAMPLE=["2216", "2189"], ASSEMBLY=[ASSEMBLY]),
-        expand("tr_validation/csv/orthogonal_support/{SAMPLE}.{ASSEMBLY}.{TECH}.tsv", SAMPLE=SAMPLES, ASSEMBLY=[ASSEMBLY], TECH=[BAM_TECH]),
-        # expand("tr_validation/data/all_loci/orthogonal_support/{SAMPLE}.{ASSEMBLY}.{TECH}.read_support.csv", SAMPLE=SAMPLES, ASSEMBLY=[ASSEMBLY], TECH=["illumina", "element", "ont", "hifi"]),
-        # expand("tr_validation/data/all_loci/orthogonal_support/{SAMPLE}.{ASSEMBLY}.{TECH}.read_support.csv", SAMPLE=SAMPLES, ASSEMBLY=[ASSEMBLY], TECH=["element"]),
+
+        expand("tr_validation/csv/orthogonal_support/{SAMPLE}.{ASSEMBLY}.{TECH}.tsv", SAMPLE=SAMPLES, ASSEMBLY=[ASSEMBLY], TECH=["hifi", "element"]),
+        # expand("tr_validation/data/all_loci/orthogonal_support/{SAMPLE}.{ASSEMBLY}.{TECH}.{METHOD}.read_support.csv", SAMPLE=SAMPLES, ASSEMBLY=[ASSEMBLY], TECH=["hifi", "ont", "illumina", "element"], METHOD=["sample"]),
+
+        expand("tr_validation/data/all_loci/orthogonal_support/{SAMPLE}.{ASSEMBLY}.{TECH}.{METHOD}.read_support.csv", SAMPLE=SAMPLES, ASSEMBLY=[ASSEMBLY], TECH=["element"], METHOD=["all"]),
+
+        expand("tr_validation/data/denovos/orthogonal_support_recurrent/{SAMPLE}.{ASSEMBLY}.{TECH}.read_support.csv", SAMPLE=ALL_SAMPLES, ASSEMBLY=[ASSEMBLY], TECH=["hifi"]),
+
 
 rule prefilter_all_loci:
     input:
         py_script = "tr_validation/utils.py",
     output: 
-        fh = "tr_validation/data/all_loci/{SAMPLE}.{ASSEMBLY}.prefiltered.tsv"
+        fh = "tr_validation/data/all_loci/{SAMPLE}.{ASSEMBLY}.{METHOD}.prefiltered.tsv"
     params:
         kid_mutation_df = lambda wildcards: AWS_PREF + "trgt-denovo/" + wildcards.SAMPLE + "_" + SMP2SUFF[wildcards.SAMPLE] + f"_{wildcards.ASSEMBLY.lower() if 'CHM' in wildcards.ASSEMBLY else wildcards.ASSEMBLY}" + "_50bp_merge_trgtdn.csv.gz",
         annotations = lambda wildcards: ASSEMBLY2CATLOG[wildcards.ASSEMBLY]
@@ -87,34 +94,52 @@ rule prefilter_all_loci:
         import pandas as pd
         annotations = pd.read_csv(params.annotations, sep="\t")
         # merge annotations with kid mutation dataframe
-        mutations = pd.read_csv(params.kid_mutation_df, sep="\t")
+        mutations = pd.read_csv(params.kid_mutation_df, sep="\t", dtype={"child_AL": str, 
+                                                                         "mother_AL": str, 
+                                                                         "father_AL": str, 
+                                                                         "per_allele_reads_mother": str, 
+                                                                         "per_allele_reads_father": str, 
+                                                                         "per_allele_reads_child": str,
+                                                                         "father_overlap_coverage": str,
+                                                                         "mother_overlap_coverage": str})
         mutations = utils.filter_mutation_dataframe(mutations, 
                                                     denovo_coverage_min=0,
                                                     remove_duplicates=True,
                                                     remove_complex=True,
                                                     depth_min=10, 
                                                     parental_overlap_frac_max=1,)
-        # filter to just the homozygous sites
-        # mutations["is_homozygous"] = mutations["child_AL"].apply(lambda a: a.split(",")[0] == a.split(",")[1])
-        # mutations = mutations[mutations["is_homozygous"] == True]
+
+        mutations = mutations[mutations["denovo_coverage"] == 0]
+
+        # if desired, filter to just a sample of homozygous sites
+        if wildcards.METHOD == "sample":
+            mutations["is_homozygous"] = mutations["child_AL"].apply(lambda a: (len(a.split(",")) == 1) or (a.split(",")[0] == a.split(",")[1]))
+            mutations = mutations[mutations["is_homozygous"] == True]
+    
         mutations["sample_id"] = wildcards.SAMPLE
         merged_mutations = mutations.merge(annotations, left_on="trid", right_on="TRid")
-        # filter to homopolymers
-        # merged_mutations = merged_mutations[merged_mutations["motifs"].str.len() == 1].sample(100)
+
+        # filter to homopolymers if desired
+        if wildcards.METHOD == "sample":
+            merged_mutations = merged_mutations[merged_mutations["motifs"].str.len() == 1].sample(1_000)
+        
+        # if we're validating everything, we'll stick to STRs
+        elif wildcards.METHOD == "all":
+            merged_mutations = merged_mutations[(merged_mutations["motifs"].str.len() <= 6)]
+
         merged_mutations[["sample_id", "trid", "index", "genotype", "motifs", "n_motifs", "child_AL"]].to_csv(output.fh, sep="\t", index=False)
 
 
 rule validate_all_loci:
     input:
-        kid_mutation_df="tr_validation/data/all_loci/{SAMPLE}.{ASSEMBLY}.prefiltered.tsv",
+        kid_mutation_df="tr_validation/data/all_loci/{SAMPLE}.{ASSEMBLY}.{METHOD}.prefiltered.tsv",
         py_script="tr_validation/validate_with_bams.py",
-    output: "tr_validation/data/all_loci/orthogonal_support/{SAMPLE}.{ASSEMBLY}.{TECH}.read_support.csv",
+    output: "tr_validation/data/all_loci/orthogonal_support/{SAMPLE}.{ASSEMBLY}.{TECH}.{METHOD}.read_support.csv",
     params:
         vcf = lambda wildcards: AWS_PREF + "hiphase/" + wildcards.SAMPLE + "_" + SMP2SUFF[wildcards.SAMPLE] + f"_{wildcards.ASSEMBLY.lower() if 'CHM' in wildcards.ASSEMBLY else wildcards.ASSEMBLY}" + "_50bp_merge.sorted.phased.vcf.gz",
         kid_bam=lambda wildcards: get_bam_fh(wildcards.SAMPLE, TECH2PREF[wildcards.TECH], TECH2SUFF[wildcards.TECH], SMP2ALT, use_alt=True if wildcards.TECH in ("ont", "hifi") else False),
         mom_bam=lambda wildcards: get_bam_fh(SMP2MOM[wildcards.SAMPLE], TECH2PREF[wildcards.TECH], TECH2SUFF[wildcards.TECH], SMP2ALT, use_alt=True if wildcards.TECH in ("ont", "hifi") else False) if SMP2MOM[wildcards.SAMPLE] != "missing" else None,
         dad_bam=lambda wildcards: get_bam_fh(SMP2DAD[wildcards.SAMPLE], TECH2PREF[wildcards.TECH], TECH2SUFF[wildcards.TECH], SMP2ALT, use_alt=True if wildcards.TECH in ("ont", "hifi") else False) if SMP2DAD[wildcards.SAMPLE] != "missing" else None,
-        max_al=lambda wildcards: 10_000 if wildcards.TECH in ("ont", "hifi") else 120,
     shell:
         """
         python {input.py_script} --mutations {input.kid_mutation_df} \
@@ -122,10 +147,9 @@ rule validate_all_loci:
                                  --kid_bam {params.kid_bam} \
                                  --sample_id {wildcards.SAMPLE} \
                                  --out {output} \
-                                 --variant_type dnm \
+                                 --tech {wildcards.TECH} \
                                  -mom_bam {params.mom_bam} \
-                                 -dad_bam {params.dad_bam} \
-                                 -max_al {params.max_al} \                                 
+                                 -dad_bam {params.dad_bam}
         """
 
 
@@ -133,7 +157,6 @@ rule prefilter_denovos:
     input:
         py_script = "tr_validation/utils.py",
         ped = "tr_validation/data/file_mapping.csv",
-
     output: 
         fh = "tr_validation/data/denovos/{SAMPLE}.{ASSEMBLY}.prefiltered.tsv"
     params:
@@ -149,25 +172,93 @@ rule prefilter_denovos:
                                                                          "father_overlap_coverage": str,
                                                                          "mother_overlap_coverage": str})
         mutations["sample_id"] = wildcards.SAMPLE
-        print ("############", mutations[mutations["trid"].str.startswith("chrY")])
 
         file_mapping = pd.read_csv(input.ped, dtype={"sample_id": str})
         mutations = mutations.merge(file_mapping)
-        print (mutations.columns)
 
-        # basic filtering, only remove stuff that's not a putative de novo
         mutations = utils.filter_mutation_dataframe(mutations,
                                                     remove_complex = False,
                                                     remove_duplicates = False,
                                                     remove_gp_ev = False,
                                                     remove_inherited = True,
-                                                    parental_overlap_frac_max = 1,
-                                                    denovo_coverage_min = 1,
-                                                    depth_min = 10,)
+                                                    parental_overlap_frac_max = 0.05,
+                                                    denovo_coverage_min = 2,
+                                                    depth_min = 10,
+                                                    child_ratio_min = 0.2)
 
-        print ("####", wildcards.ASSEMBLY, mutations[mutations["child_MC"].str.contains("_")].shape)
         mutations["sample_id"] = wildcards.SAMPLE
         mutations.to_csv(output.fh, sep="\t", index=False)
+
+
+rule get_recurrent_trids:
+    input:
+        fhs = expand("tr_validation/data/denovos/{SAMPLE}.{{ASSEMBLY}}.prefiltered.tsv", SAMPLE=CHILDREN),
+    output:
+        fh = "tr_validation/data/recurrent_trids.{ASSEMBLY}.tsv"
+    params: 
+        annotations = lambda wildcards: ASSEMBLY2CATLOG[wildcards.ASSEMBLY],
+    run:
+        import pandas as pd
+
+        dfs = []
+        for fh in input.fhs:
+            df = pd.read_csv(fh, sep="\t", dtype={"sample_id": str})
+            dfs.append(df)
+        dfs = pd.concat(dfs)
+
+        dfs["generation"] = dfs["sample_id"].apply(lambda s: "G4" if s.startswith("200") else "G2" if s in ("2209", "2188") else "G3")
+
+        # figure out which TRIDs are observed as DNs
+        # multiple times in a single generation, rather than multiple
+        # times across generations
+        generational = dfs.groupby("trid").agg(inter=("generation", lambda g: len(set(g))), intra=("generation", lambda g: sum([gi == "G3" for gi in g]))).reset_index()
+
+        intra_trids = generational[generational["intra"] > 1]["trid"].unique()
+        inter_trids = generational[generational["inter"] > 1]["trid"].unique()
+        combined_trids = set(intra_trids).union(set(inter_trids))
+        print (len(combined_trids))
+
+        print ("INTRA-GENERATIONAL", len(intra_trids))
+        print ("INTER-GENERATIONAL", len(inter_trids))
+        # output a subsetted dataframe with the information necessary to do orthogonal validation
+        dfs = dfs[dfs["trid"].isin(combined_trids)].drop_duplicates("trid")
+        dfs = dfs.merge(generational)
+
+        annotations = pd.read_csv(params.annotations, sep="\t")
+        dfs = dfs.merge(annotations, left_on="trid", right_on="TRid")
+
+        # figure out motif size distro
+        dfs["motif_class"] = dfs["motifs"].apply(lambda m: "complex" if "," in m else "STR" if len(m) <= 6 else "VNTR")
+        dfs["motif_class_alt"] = dfs["max_motiflen"].apply(lambda l: "STR" if l <= 6 else "VNTR")
+        print (dfs.groupby(["inter", "intra", "motif_class"]).size())
+        print (dfs.groupby(["inter", "intra", "motif_class_alt"]).size())
+
+        dfs[["trid", "index", "child_AL"]].drop_duplicates("trid").to_csv(output.fh, index=False, sep="\t")
+
+
+# query orthogonal BAMs for evidence at each of the raw denovo loci
+rule validate_recurrent_with_orthogonal_tech:
+    input:
+        py_script="tr_validation/validate_with_bams.py",
+        trids = "tr_validation/data/recurrent_trids.{ASSEMBLY}.tsv"
+    output: "tr_validation/data/denovos/orthogonal_support_recurrent/{SAMPLE}.{ASSEMBLY}.{TECH}.read_support.csv",
+    params:
+        vcf = lambda wildcards: AWS_PREF + "hiphase/" + wildcards.SAMPLE + "_" + SMP2SUFF[wildcards.SAMPLE] + f"_{wildcards.ASSEMBLY.lower() if 'CHM' in wildcards.ASSEMBLY else wildcards.ASSEMBLY}" + "_50bp_merge.sorted.phased.vcf.gz",
+        kid_bam = lambda wildcards: get_bam_fh(wildcards.SAMPLE, TECH2PREF[wildcards.TECH], TECH2SUFF[wildcards.TECH], SMP2ALT, use_alt=True if wildcards.TECH in ("ont", "hifi") else False),
+        mom_bam = None,
+        dad_bam = None,
+    shell:
+        """
+        python {input.py_script} --mutations {input.trids} \
+                                 --vcf {params.vcf} \
+                                 --kid_bam {params.kid_bam} \
+                                 --sample_id {wildcards.SAMPLE} \
+                                 --out {output} \
+                                 --tech {wildcards.TECH} \
+                                 -mom_bam {params.mom_bam} \
+                                 -dad_bam {params.dad_bam} \
+                        
+        """
 
 
 # merge raw de novo calls with grandparental evidence
@@ -233,10 +324,9 @@ rule validate_with_orthogonal_tech:
     output: "tr_validation/data/denovos/orthogonal_support/{SAMPLE}.{ASSEMBLY}.{TECH}.read_support.csv",
     params:
         vcf = lambda wildcards: AWS_PREF + "hiphase/" + wildcards.SAMPLE + "_" + SMP2SUFF[wildcards.SAMPLE] + f"_{wildcards.ASSEMBLY.lower() if 'CHM' in wildcards.ASSEMBLY else wildcards.ASSEMBLY}" + "_50bp_merge.sorted.phased.vcf.gz",
-        kid_bam = lambda wildcards: get_bam_fh(wildcards.SAMPLE, bam_pref, bam_suff, SMP2ALT, use_alt=True if BAM_TECH != "element" else False),
-        mom_bam = lambda wildcards: get_bam_fh(SMP2MOM[wildcards.SAMPLE], bam_pref, bam_suff, SMP2ALT, use_alt=True if BAM_TECH != "element" else False) if SMP2MOM[wildcards.SAMPLE] != "missing" else None,
-        dad_bam = lambda wildcards: get_bam_fh(SMP2DAD[wildcards.SAMPLE], bam_pref, bam_suff, SMP2ALT, use_alt=True if BAM_TECH != "element" else False) if SMP2DAD[wildcards.SAMPLE] != "missing" else None,
-        max_al = lambda wildcards: 10_000 if wildcards.TECH != "element" else 120,
+        kid_bam = lambda wildcards: get_bam_fh(wildcards.SAMPLE, TECH2PREF[wildcards.TECH], TECH2SUFF[wildcards.TECH], SMP2ALT, use_alt=True if wildcards.TECH in ("ont", "hifi") else False),
+        mom_bam = lambda wildcards: get_bam_fh(SMP2MOM[wildcards.SAMPLE], TECH2PREF[wildcards.TECH], TECH2SUFF[wildcards.TECH], SMP2ALT, use_alt=True if wildcards.TECH in ("ont", "hifi") else False) if SMP2MOM[wildcards.SAMPLE] != "missing" else None,
+        dad_bam = lambda wildcards: get_bam_fh(SMP2DAD[wildcards.SAMPLE], TECH2PREF[wildcards.TECH], TECH2SUFF[wildcards.TECH], SMP2ALT, use_alt=True if wildcards.TECH in ("ont", "hifi") else False) if SMP2DAD[wildcards.SAMPLE] != "missing" else None,
     shell:
         """
         python {input.py_script} --mutations {input.kid_mutation_df} \
@@ -244,17 +334,16 @@ rule validate_with_orthogonal_tech:
                                  --kid_bam {params.kid_bam} \
                                  --sample_id {wildcards.SAMPLE} \
                                  --out {output} \
-                                 --variant_type dnm \
+                                 --tech {wildcards.TECH} \
                                  -mom_bam {params.mom_bam} \
-                                 -dad_bam {params.dad_bam} \
-                                 -max_al {params.max_al}                            
+                                 -dad_bam {params.dad_bam}
         """
 
 # merge raw de novo calls with orthogonal read evidence
 rule merge_with_orthogonal_evidence:
     input:
         py_script = "tr_validation/annotate_with_orthogonal_evidence.py",
-        kid_mutation_df = "tr_validation/data/denovos/{SAMPLE}.{ASSEMBLY}.prefiltered.tsv",
+        kid_mutation_df = "tr_validation/csv/filtered_and_merged/{SAMPLE}.{ASSEMBLY}.tsv",
         kid_orthogonal = "tr_validation/data/denovos/orthogonal_support/{SAMPLE}.{ASSEMBLY}.{TECH}.read_support.csv"
     output: "tr_validation/csv/orthogonal_support/{SAMPLE}.{ASSEMBLY}.{TECH}.tsv"
     shell:
