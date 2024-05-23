@@ -52,9 +52,19 @@ def add_likely_de_novo_size(row: pd.Series):
     # figure out the inferred phase of the site, if not unknown
     phase = row["phase_summary"].split(":")[0]
 
+    # if phase is unknown, we just use the minimum difference between the
+    # de novo AL and any of the four parental ALs, assuming that the smallest
+    # difference is the most parsimonious expansion/contraction
     if phase == "unknown":
-        return np.nan
+        parent_als = []
+        for parent in ("father", "mother"):
+            parent_als.extend(list(map(int, row[f"{parent}_AL"].split(","))))
 
+        abs_denovo_diffs = np.array([abs(denovo_al - al) for al in parent_als])
+        denovo_diffs = np.array([denovo_al - al for al in parent_als])
+        min_diff_idx = np.argmin(abs_denovo_diffs)
+        # likely original AL
+        return denovo_diffs[min_diff_idx]
     else:
         if phase == "dad":
             parent_als = list(map(int, row["father_AL"].split(",")))
@@ -141,158 +151,3 @@ def filter_mutation_dataframe(
     # mutations["denovo_size"] = mutations.apply(lambda row: add_likely_de_novo_size(row), axis=1)
 
     return mutations
-
-
-# @numba.njit
-def bp_overlap(s1: int, e1: int, s2: int, e2: int):
-    return max(
-        max((e2 - s1), 0) - max((e2 - e1), 0) - max((s2 - s1), 0),
-        0,
-    )
-
-
-def count_indel_in_read(
-    ct: List[Tuple[int, int]], rs: int, vs: int, ve: int, slop: int = 1
-) -> int:
-    """count up inserted and deleted sequence in a read
-    using the pysam cigartuples object. a cigartuples object
-    is a list of tuples -- each tuple stores a CIGAR operation as
-    its first element and the number of bases attributed to that operation
-    as its second element. exact match is (0, N), where N is the number
-    of bases that match the reference, insertions are (1, N), and deletions
-    are (2, N). we only count CIGAR operations that completely overlap
-    the expected STR locus interval (+/- the size of the STR expansion).
-
-    Args:
-        ct (Tuple[int, int]): cigartuples object
-        rs (int): start of read w/r/t reference
-        re (int): end of read w/r/t reference
-        vs (int): start of TR locus in reference
-        ve (int): end of TR locus in reference
-
-    Returns:
-        int: net ins/del sequence in read w/r/t reference
-    """
-
-    # loop over cigar operations in the read. if a cigar operation
-    # is within the variant locus, add it to the running total of
-    # ins/del operations in the read.
-    cigar_op_total = 0
-    cur_pos = rs
-
-    for op, bp in ct:
-        # check if this operation type consumes reference sequence.
-        # if so, we'll keep track of the bp associated with the op.
-        if bool(CONSUMES_REF[op]):
-            op_length = bp
-        else:
-            op_length = 0
-        # if the operation isn't an INS, DEL, or MATCH, we can
-        # just increment the running start and move on
-        if op not in (INS, DEL, MATCH):
-            cur_pos += op_length
-            continue
-        else:
-            # keep track of the *relative* start and end of the operation,
-            # given the number of consumable base pairs that have been
-            # encountered in the iteration so far.
-            op_s, op_e = cur_pos, cur_pos + max([1, op_length])
-            # if this operation overlaps our STR locus, increment our counter
-            # of net CIGAR operations.
-            overlapping_bp = bp_overlap(op_s, op_e, vs - slop, ve + slop)
-
-            if overlapping_bp > 0:
-                cigar_op_total += (bp * OP2DIFF[op])
-
-            # increment our current position counter regardless of whether the
-            # operation overlaps our STR locus of interest
-            cur_pos += op_length
-
-    return cigar_op_total
-
-
-def get_read_diff(
-    read: pysam.AlignedSegment,
-    start: int,
-    end: int,
-    min_mapq: int = 20,
-    slop: int = 1,
-) -> Union[None, int]:
-    """compare a single sequencing read and to the reference. then,
-    count up the net inserted/deleted sequence in the read.
-
-    Args:
-        read (pysam.AlignedSegment): pysam read (aligned segment) object.
-        start (int): start position of the variant as reported in the VCF.
-        end (int): end position of the variant as reported in the VCF.
-        min_mapq (int, optional): minimum mapping quality for a read to be considered. Defaults to 60.
-        slop (int, optional): amount of slop around the start and end of the variant reported site. Defaults to 0.
-
-    Returns:
-        Union[None, int]: either None (if the read fails basic checks) or the net ins/del in read w/r/t reference
-    """
-
-    # initial filter on mapping quality
-    if read.mapping_quality < min_mapq:
-        return None
-
-    qs, qe = read.reference_start, read.reference_end
-
-    # ensure that this read completely overlaps the TR locus
-    if qs > (start - slop) or qe < (end + slop):
-        return None
-
-    # query the CIGAR string in the read.
-    diff = count_indel_in_read(
-        read.cigartuples,
-        qs,
-        start,
-        end,
-        slop=slop,
-    )
-
-    return diff
-
-
-def extract_diffs_from_bam(
-    bam: pysam.AlignmentFile,
-    chrom: str,
-    start: int,
-    end: int,
-    min_mapq: int = 60,
-) -> List[Tuple[int, int]]:
-    """gather information from all reads aligned to the specified region.
-
-    Args:
-        bam (pysam.AlignmentFile): pysam.AlignmentFile object
-        chrom (str): chromosome we want to query
-        start (int): start of TR locus
-        end (int): end of TR locus
-        min_mapq (int, optional): minimum MAPQ required for reads. Defaults to 60.
-
-    Returns:
-        List[Tuple[int, int]]: List of (X, Y) tuples where X is the read "diff" and Y is the
-         number of reads with that "diff" 
-    """
-    diffs = []
-
-    if bam is None:
-        diffs.append(0)
-    else:
-        for read in bam.fetch(chrom, start, end):
-            diff = get_read_diff(
-                read,
-                start,
-                end,
-                slop=0.5 * (end - start),
-                min_mapq=min_mapq,
-            )
-
-            if diff is None:
-                continue
-            else:
-                diffs.append(diff)
-
-    # count up all recorded diffs between reads and reference allele
-    diff_counts = Counter(diffs).most_common()
-    return diff_counts
