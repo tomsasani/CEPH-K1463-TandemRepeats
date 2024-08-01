@@ -19,7 +19,19 @@ OP2DIFF = {MATCH: 0, INS: 1, DEL: -1}
 CONSUMES_REF = dict(zip(range(9), [1, 0, 1, 1, 0, 0, 0, 1, 1]))
 
 
-def bp_overlap(s1: int, e1: int, s2: int, e2: int):
+def bp_overlap(s1: int, e1: int, s2: int, e2: int) -> int:
+    """simple utility to determine the amount of
+    overlap between two interval coordinates
+
+    Args:
+        s1 (int): start of interval 1
+        e1 (int): end of interval 1
+        s2 (int): start of interval 2
+        e2 (int): end of interval 2
+
+    Returns:
+        int: size of overlap
+    """
     return max(
         max((e2 - s1), 0) - max((e2 - e1), 0) - max((s2 - s1), 0),
         0,
@@ -27,7 +39,11 @@ def bp_overlap(s1: int, e1: int, s2: int, e2: int):
 
 
 def count_indel_in_read(
-    ct: List[Tuple[int, int]], rs: int, vs: int, ve: int, slop: int = 1
+    ct: List[Tuple[int, int]],
+    rs: int,
+    vs: int,
+    ve: int,
+    slop: int = 1,
 ) -> int:
     """count up inserted and deleted sequence in a read
     using the pysam cigartuples object. a cigartuples object
@@ -36,12 +52,11 @@ def count_indel_in_read(
     as its second element. exact match is (0, N), where N is the number
     of bases that match the reference, insertions are (1, N), and deletions
     are (2, N). we only count CIGAR operations that completely overlap
-    the expected STR locus interval (+/- the size of the STR expansion).
+    the expected STR locus interval.
 
     Args:
-        ct (Tuple[int, int]): cigartuples object
+        ct (Tuple[int, int]): pysam cigartuples object
         rs (int): start of read w/r/t reference
-        re (int): end of read w/r/t reference
         vs (int): start of TR locus in reference
         ve (int): end of TR locus in reference
 
@@ -49,21 +64,26 @@ def count_indel_in_read(
         int: net ins/del sequence in read w/r/t reference
     """
 
-    # loop over cigar operations in the read. if a cigar operation
-    # is within the variant locus, add it to the running total of
-    # ins/del operations in the read.
+    # keep a running total of net ins/del operations in the read.
     cigar_op_total = 0
+    # count from the first position in the read w/r/t the reference
     cur_pos = rs
 
+    # loop over the cigartuples object, operation by operation
     for op, bp in ct:
         # check if this operation type consumes reference sequence.
         # if so, we'll keep track of the bp associated with the op.
+        # if not, 
         if bool(CONSUMES_REF[op]):
             op_length = bp
         else:
             op_length = 0
         # if the operation isn't an INS, DEL, or MATCH, we can
-        # just increment the running start and move on
+        # just increment the running start and move on. e.g., if
+        # the operation is a mismatch or a soft clip, we're not interested
+        # in incrementing our net CIGAR totals by the number of bp affected
+        # by that operation. however, we *do* need to increment our current
+        # position.
         if op not in (INS, DEL, MATCH):
             cur_pos += op_length
             continue
@@ -72,13 +92,11 @@ def count_indel_in_read(
             # given the number of consumable base pairs that have been
             # encountered in the iteration so far.
             op_s, op_e = cur_pos, cur_pos + max([1, op_length])
-            # if this operation overlaps our STR locus, increment our counter
-            # of net CIGAR operations.
+            # figure out the amount of overlap between this opeartion and
+            # our TR locus. increment our counter of net CIGAR operations by this overlap.
             overlapping_bp = bp_overlap(op_s, op_e, vs - slop, ve + slop)
-
             if overlapping_bp > 0:
-                cigar_op_total += (bp * OP2DIFF[op])
-
+                cigar_op_total += (op_length * OP2DIFF[op])
             # increment our current position counter regardless of whether the
             # operation overlaps our STR locus of interest
             cur_pos += op_length
@@ -90,7 +108,7 @@ def get_read_diff(
     read: pysam.AlignedSegment,
     start: int,
     end: int,
-    min_mapq: int = 20,
+    min_mapq: int = 60,
     slop: int = 1,
 ) -> Union[None, int]:
     """compare a single sequencing read and to the reference. then,
@@ -98,10 +116,10 @@ def get_read_diff(
 
     Args:
         read (pysam.AlignedSegment): pysam read (aligned segment) object.
-        start (int): start position of the variant as reported in the VCF.
-        end (int): end position of the variant as reported in the VCF.
+        start (int): start position of the TR locus in the reference.
+        end (int): end position of the TR locus.
         min_mapq (int, optional): minimum mapping quality for a read to be considered. Defaults to 60.
-        slop (int, optional): amount of slop around the start and end of the variant reported site. Defaults to 0.
+        slop (int, optional): amount of slop around the start and end of the variant reported site. Defaults to 1.
 
     Returns:
         Union[None, int]: either None (if the read fails basic checks) or the net ins/del in read w/r/t reference
@@ -109,14 +127,14 @@ def get_read_diff(
     # initial filter on mapping quality
     if read.mapping_quality < min_mapq:
         return None
-
+    
+    # get the start and end positions of the read w/r/t the reference
     qs, qe = read.reference_start, read.reference_end
-
-    adj_start, adj_end = start - slop, end + slop
 
     # ensure that this read completely overlaps the TR locus along with
     # slop. if the read starts after the adjusted/slopped start
     # or if it ends before the adjusted/slopped end, skip the read
+    adj_start, adj_end = start - slop, end + slop
     if qs > adj_start or qe < adj_end:
         return None
 
@@ -138,7 +156,6 @@ def extract_diffs_from_bam(
     start: int,
     end: int,
     min_mapq: int = 60,
-    tech: str = "element",
 ) -> List[Tuple[int, int]]:
     """gather information from all reads aligned to the specified region.
 
@@ -163,7 +180,7 @@ def extract_diffs_from_bam(
                 read,
                 start,
                 end,
-                slop= 0.25 * (end - start),# if tech in ("hifi") else 0.1 * (end - start),
+                slop= 0.1 * (end - start),
                 min_mapq=min_mapq,
             )
 
@@ -203,9 +220,12 @@ def main(args):
 
     # mutations = pd.DataFrame(
     #     {
-    #         "trid": ["chr7_42734099_42734214_trsolve"],
+    #         "trid": ["chr5_34415512_34417740_trsolve"],
+    #         "#chrom": ["chr5"],
+    #         "start": [34415512],
+    #         "end": [34417740],
     #         "index": [1],
-    #         "child_AL": ["189,219"],
+    #         "child_AL": ["671,2290"],
     #     }
     # )
 
@@ -217,9 +237,6 @@ def main(args):
     #         for l in trid_infh:
     #             trids.append(l.strip())
     #     trid_infh.close()
-
-    # read in the VCF file
-    vcf = VCF(args.vcf, gts012=True)
 
     # read in BAM files for this sample, as well as parents if applicable
     kid_bam, mom_bam, dad_bam = (
@@ -240,7 +257,7 @@ def main(args):
         # extract chrom, start and end
         trid = row_dict["trid"]
 
-        chrom, start, end, _ = trid.split("_")
+        chrom, start, end = row["#chrom"], row["start"], row["end"]
         start, end = int(start) - 1, int(end)
         region = f"{chrom}:{start}-{end}"
 
@@ -262,86 +279,76 @@ def main(args):
         else:
             non_denovo_al = allele_lengths[1 - denovo_idx]
 
-        # loop over VCF
-        for var in vcf(region):
-            # ensure the VCF TRID matches the TR TRID
-            var_trid = var.INFO.get("TRID")
-            assert var_trid == trid
+       
+        ref_len = end - start
+        # calculate expected diffs between alleles and the reference genome.
+        exp_diff_denovo = denovo_al - ref_len
+        exp_diff_non_denovo = non_denovo_al - ref_len
 
-            # concatenate the alleles at this locus
-            alleles = [var.REF]
-            alleles.extend(var.ALT)
+        # if the total length of either allele is greater than the length of
+        # a typical read, move on
+        max_al = 100_000 if args.tech in ("hifi", "ont") else 120
 
-            # figure out the motif(s) that's repeated in the STR
-            tr_motif = var.INFO.get("MOTIFS")
+        if max([denovo_al, non_denovo_al]) > max_al:
+            continue
 
-            # calculate expected diffs between alleles and the reference genome.
-            exp_diff_denovo = denovo_al - len(var.REF)
-            exp_diff_non_denovo = non_denovo_al - len(var.REF)
-
-            # if the total length of either allele is greater than the length of
-            # a typical read, move on
-            max_al = 100_000 if args.tech in ("hifi", "ont") else 120
-
-            if max([denovo_al, non_denovo_al]) > max_al:
-                continue
-
-            row_dict.update(
-                {
-                    "region": region,
-                    "motif": tr_motif,
-                    "exp_allele_diff_denovo": exp_diff_denovo,
-                    "exp_allele_diff_non_denovo": exp_diff_non_denovo,
-                }
-            )
-
-            # loop over reads in the BAM for this individual
-            bam_evidence = {
-                "mom_evidence": None,
-                "dad_evidence": None,
-                "kid_evidence": None,
+        row_dict.update(
+            {
+                "region": region,
+                "exp_allele_diff_denovo": exp_diff_denovo,
+                "exp_allele_diff_non_denovo": exp_diff_non_denovo,
             }
+        )
 
-            for bam, label in zip(
-                (mom_bam, dad_bam, kid_bam),
-                ("mom", "dad", "kid"),
-            ):
-                diff_counts = extract_diffs_from_bam(
-                    bam,
-                    chrom,
-                    start,
-                    end,
-                    min_mapq=60,
-                    tech=args.tech,
-                )
+        # loop over reads in the BAM for this individual
+        bam_evidence = {
+            "mom_evidence": None,
+            "dad_evidence": None,
+            "kid_evidence": None,
+        }
 
-                # calculate the total number of queryable reads
-                # for this individual. if that's < 10, move on.
-                total_depth = sum([v for k, v in diff_counts])
-                if total_depth < 10: 
-                    continue
-                else:
-                    # otherwise, summarize the orthogonal evidence
-                    evidence = {
-                        f"{label}_evidence": "|".join(
-                            [
-                                ":".join(list(map(str, [diff, count])))
-                                for diff, count in diff_counts
-                            ]
-                        )
-                    }
-                    bam_evidence.update(evidence)
+        for bam, label in zip(
+            (mom_bam, dad_bam, kid_bam),
+            ("mom", "dad", "kid"),
+        ):
+            diff_counts = extract_diffs_from_bam(
+                bam,
+                chrom,
+                start,
+                end,
+                min_mapq=60,
+                tech=args.tech,
+            )
+            
+            # print (diff_counts)
 
-            # if any members of the trio had fewer than 10 "good" reads,
-            # AND we passed in BAM files for everyone, skip
-            skip = False
-            for b, k in zip((args.kid_bam, args.mom_bam, args.dad_bam), ("kid_evidence", "mom_evidence", "dad_evidence")):
-                if b != "None" and bam_evidence[k] is None:
-                    skip = True
-            if skip: continue
+            # calculate the total number of queryable reads
+            # for this individual. if that's < 10, move on.
+            total_depth = sum([v for k, v in diff_counts])
+            if total_depth < 10: 
+                continue
             else:
-                row_dict.update(bam_evidence)
-                res.append(row_dict)
+                # otherwise, summarize the orthogonal evidence
+                evidence = {
+                    f"{label}_evidence": "|".join(
+                        [
+                            ":".join(list(map(str, [diff, count])))
+                            for diff, count in diff_counts
+                        ]
+                    )
+                }
+                bam_evidence.update(evidence)
+
+        # if any members of the trio had fewer than 10 "good" reads,
+        # AND we passed in BAM files for everyone, skip
+        skip = False
+        for b, k in zip((args.kid_bam, args.mom_bam, args.dad_bam), ("kid_evidence", "mom_evidence", "dad_evidence")):
+            if b != "None" and bam_evidence[k] is None:
+                skip = True
+        if skip: continue
+        else:
+            row_dict.update(bam_evidence)
+            res.append(row_dict)
 
     res_df = pd.DataFrame(res)
 
@@ -353,10 +360,6 @@ if __name__ == "__main__":
     p.add_argument(
         "--mutations",
         help="""Path to parquet/tsv file containing candidate mutations""",
-    )
-    p.add_argument(
-        "--vcf",
-        help="""Path to TRGT VCF file for the sample of interest""",
     )
     p.add_argument(
         "--kid_bam",
