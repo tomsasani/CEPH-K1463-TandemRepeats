@@ -216,27 +216,7 @@ def read_bam(fh: str):
 
 def main(args):
 
-    
-
-    # mutations = pd.DataFrame(
-    #     {
-    #         "trid": ["chr5_34415512_34417740_trsolve"],
-    #         "#chrom": ["chr5"],
-    #         "start": [34415512],
-    #         "end": [34417740],
-    #         "index": [1],
-    #         "child_AL": ["671,2290"],
-    #     }
-    # )
-
     mutations = pd.read_csv(args.mutations, sep="\t", dtype={"child_AL": str})
-
-    # trids = []
-    # if args.trids is not None:
-    #     with open(args.trids, "r") as trid_infh:
-    #         for l in trid_infh:
-    #             trids.append(l.strip())
-    #     trid_infh.close()
 
     # read in BAM files for this sample, as well as parents if applicable
     kid_bam, mom_bam, dad_bam = (
@@ -246,16 +226,10 @@ def main(args):
     # store output
     res = []
 
-
-    # if args.trids is not None:
-    #     mutations = mutations[mutations["trid"].isin(trids)]
-    for i,row in tqdm.tqdm(mutations.iterrows()):
+    for i, row in tqdm.tqdm(mutations.iterrows()):
         # convert the pd.Series into a dict we can update
         # with addtl info later
         row_dict = row.to_dict()
-
-        # extract chrom, start and end
-        trid = row_dict["trid"]
 
         chrom, start, end = row["#chrom"], row["start"], row["end"]
         start, end = int(start) - 1, int(end)
@@ -320,8 +294,6 @@ def main(args):
                 tech=args.tech,
             )
             
-            # print (diff_counts)
-
             # calculate the total number of queryable reads
             # for this individual. if that's < 10, move on.
             total_depth = sum([v for k, v in diff_counts])

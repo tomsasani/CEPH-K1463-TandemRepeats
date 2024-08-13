@@ -38,24 +38,54 @@ def al_in_parents(row: pd.Series):
         else: return False
 
 
-def add_likely_de_novo_size(row: pd.Series):
+def add_likely_de_novo_size(row: pd.Series, use_phase: bool = True):
 
     child_als = list(map(int, row["child_AL"].split(",")))
     # denovo idx
     denovo_idx = int(row["index"])
     denovo_al = child_als[denovo_idx]
+    non_denovo_al = None
 
     if not row["trid"].startswith("chrX"):
         non_denovo_idx = 1 - denovo_idx
         non_denovo_al = child_als[non_denovo_idx]
 
     # figure out the inferred phase of the site, if not unknown
-    phase = row["phase_summary"].split(":")[0]
+    phase = "unknown"
+    if "phase_summary" in row:
+        phase = row["phase_summary"].split(":")[0]
 
-    # if phase is unknown, we just use the minimum difference between the
+    # if phase is unknown, we *could* just use the minimum difference between the
     # de novo AL and any of the four parental ALs, assuming that the smallest
-    # difference is the most parsimonious expansion/contraction
-    if phase == "unknown":
+    # difference is the most parsimonious expansion/contraction. however, this is too
+    # naive. for example, if the kid's non-denovo AL perfectly matches one of the two parents,
+    # then we can assume inheritance of that allele from taht parent. we can call this "fuzzy"
+    # phasing.
+
+    # what if the kid perfectly inherited an AL form one parent?
+    if use_phase:
+        if phase == "unknown":
+            parent_als = []
+            for parent in ("father", "mother"):
+                parent_als.extend(list(map(int, row[f"{parent}_AL"].split(","))))
+
+            abs_denovo_diffs = np.array([abs(denovo_al - al) for al in parent_als])
+            denovo_diffs = np.array([denovo_al - al for al in parent_als])
+            min_diff_idx = np.argmin(abs_denovo_diffs)
+            # likely original AL
+            return denovo_diffs[min_diff_idx]
+        else:
+            if phase == "dad":
+                parent_als = list(map(int, row["father_AL"].split(",")))
+            elif phase == "mom":
+                parent_als = list(map(int, row["mother_AL"].split(",")))
+
+            abs_denovo_diffs = np.array([abs(denovo_al - al) for al in parent_als])
+            denovo_diffs = np.array([denovo_al - al for al in parent_als])
+            min_diff_idx = np.argmin(abs_denovo_diffs)
+            # likely original AL
+            return denovo_diffs[min_diff_idx]
+    else:
         parent_als = []
         for parent in ("father", "mother"):
             parent_als.extend(list(map(int, row[f"{parent}_AL"].split(","))))
@@ -65,17 +95,38 @@ def add_likely_de_novo_size(row: pd.Series):
         min_diff_idx = np.argmin(abs_denovo_diffs)
         # likely original AL
         return denovo_diffs[min_diff_idx]
-    else:
-        if phase == "dad":
-            parent_als = list(map(int, row["father_AL"].split(",")))
-        elif phase == "mom":
-            parent_als = list(map(int, row["mother_AL"].split(",")))
+    
+def determine_motif_size(row: pd.Series):
+    """returns index of the motif in a complex locus that is mutated"""
+    
+    min_motif_len = row["min_motiflen"]
+    max_motif_len = row["max_motiflen"]
 
-        abs_denovo_diffs = np.array([abs(denovo_al - al) for al in parent_als])
-        denovo_diffs = np.array([denovo_al - al for al in parent_als])
-        min_diff_idx = np.argmin(abs_denovo_diffs)
-        # likely original AL
-        return denovo_diffs[min_diff_idx]
+    # all same
+    if row["n_motifs"] == 1: return min_motif_len
+    else: return -1
+
+    # return min_motif_len if row["n_motifs"] == 1 else -1
+
+def determine_simplified_motif_size(row: pd.Series):
+    """returns index of the motif in a complex locus that is mutated"""
+
+    is_complex = row["n_motifs"] > 1
+    if not is_complex:
+        return "STR" if row["min_motiflen"] <= 6 else "VNTR"
+    else:
+        min_motif_len = row["min_motiflen"]
+        max_motif_len = row["max_motiflen"]
+
+        # all STR
+        if max_motif_len <= 6: return "STR"
+        # mix of STR and VNTR
+        elif min_motif_len <= 6 and max_motif_len > 6: return "complex"
+        # all VNTR
+        elif min_motif_len > 6: return "VNTR"
+        else: return "?"
+
+
 
 def filter_mutation_dataframe(
     mutations: pd.DataFrame,
@@ -99,15 +150,13 @@ def filter_mutation_dataframe(
         mutations = mutations[
             (mutations["denovo_coverage"] >= denovo_coverage_min)
         ]
+    
 
     mutations = mutations[mutations["child_ratio"] >= child_ratio_min]
-    # only look at autosomes + X
+    # only look at autosomes + X + Y
     mutations = mutations[~mutations["trid"].str.contains("Un|random", regex=True)]
-    # remove pathogenics
-    mutations = mutations[~mutations["trid"].str.contains("pathogenic")]
-    # remove non-TRF/TRSOLVE
-    mutations = mutations[mutations["trid"].str.contains("trsolve|TRF", regex=True)]
 
+    mutations["denovo_al"] = mutations.apply(lambda row: row["child_AL"].split(",")[row["index"]], axis=1)
 
     # remove sites where de novo AL is observed in a parent if we're interested
     # in filtering DNMs
@@ -124,13 +173,14 @@ def filter_mutation_dataframe(
     mutations["dad_dp"] = mutations["per_allele_reads_father"].apply(lambda a: sum(list(map(int, a.split(",")))))
     mutations = mutations.query(f"child_coverage >= {depth_min} and mom_dp >= {depth_min} and dad_dp >= {depth_min}")
 
+
     if remove_complex:
         mutations = mutations[~mutations["child_MC"].str.contains("_")]
     if remove_duplicates:
         dup_cols = ["trid"]
         if "sample_id" in mutations.columns:
             dup_cols.append("sample_id")
-        mutations = mutations.drop_duplicates(dup_cols)
+        mutations = mutations.drop_duplicates(dup_cols, keep="first")
 
     mutations["dad_ev"] = mutations["father_overlap_coverage"].apply(lambda o: sum(list(map(int, o.split(",")))))
     mutations["mom_ev"] = mutations["mother_overlap_coverage"].apply(lambda o: sum(list(map(int, o.split(",")))))
@@ -148,6 +198,25 @@ def filter_mutation_dataframe(
     if remove_gp_ev and "gp_ev" in mutations.columns:
         mutations = mutations[~mutations["gp_ev"].str.contains("Y")]
 
-    # mutations["denovo_size"] = mutations.apply(lambda row: add_likely_de_novo_size(row), axis=1)
 
     return mutations
+
+def infer_combined_phase(row: pd.Series):
+    phase_3gen = row["phase"]
+    phase_2gen = row["phase_summary"]
+    n_upstream, n_downstream = row["n_upstream"], row["n_downstream"]
+    consistency = row["most_common_freq"]
+
+    combined_phase = "unknown"
+    # if we have phases for both...
+    if phase_2gen != "unknown" and phase_3gen != "unknown":
+        if phase_2gen.split(":")[0] == phase_3gen: combined_phase = phase_2gen.split(":")[0]
+        else: combined_phase = "conflicting"
+    elif phase_2gen == "unknown" and phase_3gen != "unknown":
+        if consistency >= 0.75: combined_phase = phase_3gen
+        else: combined_phase = "unknown"
+    elif phase_2gen != "unknown" and phase_3gen == "unknown":
+        if n_upstream + n_downstream >= 1: return phase_2gen.split(":")[0]
+        else: combined_phase = "unknown"
+    
+    return combined_phase

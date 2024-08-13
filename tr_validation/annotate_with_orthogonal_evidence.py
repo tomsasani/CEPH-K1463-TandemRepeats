@@ -1,31 +1,8 @@
 import pandas as pd
 import argparse
 from typing import List
-from sklearn.mixture import GaussianMixture
-import numpy as np
-import math
-import utils
 from collections import defaultdict
 
-
-def assign_allele(row: pd.Series):
-
-    # figure out whether the observed diff is closer
-    # to the expected ALT or REF allele size
-    denovo_distance = abs(row["diff"] - row["exp_allele_diff_denovo"])
-    non_denovo_distance = abs(row["diff"] - row["exp_allele_diff_non_denovo"])
-
-    # if the diff is closer to the REF allele length, we'll assume
-    # that it is a REF observation. and vice versa
-    #if row["sample"] in ("mom", "dad"):
-    if denovo_distance < non_denovo_distance:
-        is_denovo = True
-    elif non_denovo_distance < denovo_distance:
-        is_denovo = False
-    else:
-        return "unk"
-
-    return "denovo" if is_denovo else "non_denovo"
 
 def annotate_with_concordance(row: pd.Series) -> str:
     """given orthogonal evidence at a locus, figure out whether
@@ -63,58 +40,33 @@ def annotate_with_concordance(row: pd.Series) -> str:
     n_alleles = len(set(kid_diffs))
     if n_alleles_exp > 1 and n_alleles == 1:
         return "not_ibs"
-    
+
     # validate by asking if the de novo allele is observed in the
     # child and absent from both parents
 
     out_dict = defaultdict(int)
+    out_dict_off_by_one = defaultdict(int)
 
     for diffs, label in zip((kid_diffs, mom_diffs, dad_diffs), ["kid", "mom", "dad"]):
 
-        dn_overlap = 0
+        dn_overlap, dn_overlap_off = 0, 0
         # allow for off-by-one errors when asking if kid has de novo.
         # don't allow for off-by-one errors when asking if parents have de novo.
         for d in diffs:
-            # if label == "kid":
             if denovo_al == d: dn_overlap += 1
-            # else:
-            #     if d == denovo_al: dn_overlap += 1
+            if d - 1 <= denovo_al <= d + 1: dn_overlap_off += 1
         out_dict[label] = dn_overlap
+        out_dict_off_by_one[label] = dn_overlap_off
 
-        # fit a Guassian mixture model to the child's allele length
-        # distribution with the expected number of components equal to
-        # the expected number of alleles
-        # X = np.array(diffs)
-        # gm = GaussianMixture(n_components=n_alleles_exp).fit(X.reshape(-1, 1))
-        # get the means and covariance sof the two components
-        # mixture_means = gm.means_ 
-        # mixture_cov = gm.covariances_
-        # calculate standard deviation from covariance matrix
-        # standard deviation (sigma) is sqrt of the product of the residuals with themselves
-        # (i.e., sqrt of the mean of the trace of the covariance matrix)
-        # mixture_std = np.array(
-        #     [np.sqrt(np.trace(mixture_cov[i]) / n_alleles_exp) for i in range(n_alleles_exp)]
-        # )
-
-        # check to see if the kid's mixture components +/- STDEV overlap the expected
-        # allele sizes. assume this locus passes by default.
-        # overlap = 0
-        # for allele_i in range(n_alleles_exp):
-        #     # allow for 1bp off
-        #     mean, std = round(mixture_means[allele_i][0]), round(max([2 * mixture_std[allele_i], 1]))
-        #     lo, hi = mean - std, mean + std
-        #     if row["region"] == "chr17:15781239-15781258":
-        #         print (lo, hi, denovo_al, non_denovo_al)
-        #         print (lo <= denovo_al <= hi, lo <= non_denovo_al <= hi)
-        #     # if this component doesn't overlap *either* the de novo or non denovo allele,
-        #     # set overlap to False
-        #     if (lo <= denovo_al <= hi) or (lo <= non_denovo_al <= hi): overlap += 1
-        #     # if not (lo <= denovo_al <= hi) and not (lo <= non_denovo_al <= hi):
-        #     #     overlap = False
-
-    if "chr2_1578" in row["trid"] and row["sample_id"] == "2211": print (out_dict)
-
-    return "pass" if (out_dict["kid"] >= 1 and out_dict["mom"] == 0 and out_dict["dad"] == 0) else "fail"
+    return (
+        "pass"
+        if (
+            out_dict_off_by_one["kid"] >= 1
+            and out_dict["mom"] == 0
+            and out_dict["dad"] == 0
+        )
+        else "fail"
+    )
 
 
 def main(args):
@@ -124,13 +76,11 @@ def main(args):
         sep="\t"
     )
     ortho_evidence = pd.read_csv(args.orthogonal_evidence)
-
     res: List[pd.DataFrame] = []
 
     for i, row in ortho_evidence.iterrows():
         row_dict = row.to_dict()
         parental_overlap = annotate_with_concordance(row)
-        if "chr2_" in row_dict["trid"] and row_dict["sample_id"] == "2211": print (parental_overlap)
         row_dict.update({"validation_status": parental_overlap})
         res.append(row_dict)
 
@@ -138,7 +88,7 @@ def main(args):
 
     # merge mutations with orthogonal validation
     mutations = mutations.merge(ortho_validation, how="left").fillna({"validation_status": "no_data", "phase_summary": "unknown"})
-    mutations["likely_denovo_size"] = mutations.apply(lambda row: utils.add_likely_de_novo_size(row), axis=1)
+    
     mutations.to_csv(args.out, sep="\t", index=False)
 
 
