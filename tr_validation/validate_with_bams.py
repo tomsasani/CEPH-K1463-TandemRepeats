@@ -1,16 +1,12 @@
-from cyvcf2 import VCF
 import pysam
 import pandas as pd
 import matplotlib.pyplot as plt
 import tqdm
 import argparse
 from collections import Counter
-import numpy as np
-import csv
-# from utils import extract_diffs_from_bam, filter_mutation_dataframe
-from schema import DeNovoSchema, InheritedSchema
-import gzip
 from typing import List, Tuple, Union
+import math
+
 
 MATCH, INS, DEL = range(3)
 OP2DIFF = {MATCH: 0, INS: 1, DEL: -1}
@@ -96,7 +92,7 @@ def count_indel_in_read(
             # our TR locus. increment our counter of net CIGAR operations by this overlap.
             overlapping_bp = bp_overlap(op_s, op_e, vs - slop, ve + slop)
             if overlapping_bp > 0:
-                cigar_op_total += (op_length * OP2DIFF[op])
+                cigar_op_total += (bp * OP2DIFF[op])
             # increment our current position counter regardless of whether the
             # operation overlaps our STR locus of interest
             cur_pos += op_length
@@ -180,7 +176,7 @@ def extract_diffs_from_bam(
                 read,
                 start,
                 end,
-                slop= 0.1 * (end - start),
+                slop=math.floor(0.1 * (end - start)),
                 min_mapq=min_mapq,
             )
 
@@ -291,7 +287,6 @@ def main(args):
                 start,
                 end,
                 min_mapq=60,
-                tech=args.tech,
             )
             
             # calculate the total number of queryable reads
