@@ -182,17 +182,17 @@ def filter_mutation_dataframe(
             dup_cols.append("sample_id")
         mutations = mutations.drop_duplicates(dup_cols, keep="first")
 
-    mutations["dad_ev"] = mutations["father_overlap_coverage"].apply(lambda o: sum(list(map(int, o.split(",")))))
-    mutations["mom_ev"] = mutations["mother_overlap_coverage"].apply(lambda o: sum(list(map(int, o.split(",")))))
+    # mutations["dad_ev"] = mutations["father_overlap_coverage"].apply(lambda o: sum(list(map(int, o.split(",")))))
+    # mutations["mom_ev"] = mutations["mother_overlap_coverage"].apply(lambda o: sum(list(map(int, o.split(",")))))
 
     mutations["dad_dp"] = mutations["per_allele_reads_father"].apply(lambda o: sum(list(map(int, o.split(",")))))
     mutations["mom_dp"] = mutations["per_allele_reads_mother"].apply(lambda o: sum(list(map(int, o.split(",")))))
 
     # calculate fraction of reads supporting the denovo in the parents
-    mutations["parental_overlap_coverage_total"] = mutations["dad_ev"] + mutations["mom_ev"]
-    mutations["parental_coverage_total"] = mutations["mom_dp"] + mutations["dad_dp"]
-    mutations["parental_overlap_coverage_frac"] = mutations["parental_overlap_coverage_total"] / mutations["parental_coverage_total"]
-    mutations = mutations.query(f"parental_overlap_coverage_frac <= {parental_overlap_frac_max}")
+    # mutations["parental_overlap_coverage_total"] = mutations["dad_ev"] + mutations["mom_ev"]
+    # mutations["parental_coverage_total"] = mutations["mom_dp"] + mutations["dad_dp"]
+    # mutations["parental_overlap_coverage_frac"] = mutations["parental_overlap_coverage_total"] / mutations["parental_coverage_total"]
+    # mutations = mutations.query(f"parental_overlap_coverage_frac <= {parental_overlap_frac_max}")
 
     # if we want to remove grandparental evidence
     if remove_gp_ev and "gp_ev" in mutations.columns:
