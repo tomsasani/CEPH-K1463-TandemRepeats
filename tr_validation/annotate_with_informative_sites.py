@@ -38,20 +38,20 @@ def var_pass(
     if len(v.ALT) > 1: return False
     # require minimum genotype quality and depth
     if np.any(v.gt_quals[idxs] < min_gq): return False
-    rd, ad = v.gt_ref_depths, v.gt_alt_depths
-    td = ad + rd
+    
+    td = v.format("DP")
     if np.any(td[idxs] < min_depth): return False
 
     # calculate allele balance, and require reasonable
     # allele balance for HOM_REF/HET/HOM_ALT
-    ab = ad / td
-    gts = v.gt_types
-    # filter UNK genotypes
-    if np.any(gts[idxs] == 3): return False
-    for idx in idxs:
-        min_ab, max_ab = GT2ALT_AB[gts[idx]]
-        if not (min_ab <= ab[idx] <= max_ab):
-            return False
+    # ab = ad / td
+    # gts = v.gt_types
+    # # filter UNK genotypes
+    # if np.any(gts[idxs] == 3): return False
+    # for idx in idxs:
+    #     min_ab, max_ab = GT2ALT_AB[gts[idx]]
+    #     if not (min_ab <= ab[idx] <= max_ab):
+    #         return False
 
     return True
 
@@ -89,14 +89,15 @@ def catalog_informative_sites(
 
     res = []
     for v in vcf(region):
+        
         # make sure variant passes basic filters
-        if not var_pass(
-            v,
-            np.array([dad_idx, mom_idx, kid_idx]),
-            min_depth=10,
-            min_gq=20,
-        ):
-            continue
+        # if not var_pass(
+        #     v,
+        #     np.array([dad_idx, mom_idx, kid_idx]),
+        #     min_depth=5,
+        #     min_gq=20,
+        # ):
+        #     continue
 
         # access unphased genotypes in kid, mom, and dad
         gts = v.gt_types
@@ -263,6 +264,9 @@ def main(args):
         is_male_x = row_dict["suffix"].startswith("S") and trid_chrom == "chrX"
         is_male_y = row_dict["suffix"].startswith("S") and trid_chrom == "chrY"
 
+
+        denovo_al = row_dict["denovo_al"]
+
         # make sure we're looking at an autosome for now
         if trid_chrom not in CHROMS:
             continue
@@ -283,6 +287,7 @@ def main(args):
                 is_male_x=is_male_x,
                 is_male_y=is_male_y,
             )
+
         if informative_phases.shape[0] == 0: 
             continue
 
@@ -316,22 +321,15 @@ def main(args):
 
             # concatenate the alleles at this locus
             alleles = [var.REF] + var.ALT
-            allele_lengths = [len(al) for al in alleles]
-
-            # figure out haplotype ID on which DNM resides
-            denovo_al, orig_al = None, None
 
             if hap_a == denovo_gt:
                 denovo_hap_id = "A"
-                denovo_al, orig_al = allele_lengths[hap_a], allele_lengths[hap_b]
             elif hap_b == denovo_gt:
                 denovo_hap_id = "B"
-                denovo_al, orig_al = allele_lengths[hap_b], allele_lengths[hap_a]
             else:
                 continue
 
             denovo_al_diff = denovo_al - len(var.REF)
-            non_denovo_al_diff = orig_al - len(var.REF)
 
             # access PS tag for child at the STR locus
             kid_ps = -1
@@ -348,9 +346,7 @@ def main(args):
                     "denovo_hap_id": denovo_hap_id,
                     "str_chrom": trid_chrom,
                     "denovo_al": denovo_al,
-                    "non_denovo_al": orig_al,
                     "denovo_al_diff": denovo_al_diff,
-                    "non_denovo_al_diff": non_denovo_al_diff,
                     "kid_str_ps": kid_ps,
                     "kid_str_gt": "|".join((str(hap_a), str(hap_b))),
                     "kid_str_hap_a": hap_a,
@@ -373,6 +369,7 @@ def main(args):
         right_on=["trid", "inf_chrom", "kid_inf_ps"],
         how="left",
     )
+
     # measure the consistency of the haplotype phasing. subset the dataframe to only
     # include the N informative sites that share a consistent haplotype origin
     # immediately surrounding the STR locus.

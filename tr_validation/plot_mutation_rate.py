@@ -12,14 +12,16 @@ plt.rc("font", size=13)
 
 
 # define some global variables we'll access for filtering
-FILTER_RECURRENT = True
-FILTER_TRANSMITTED = True
+FILTER_RECURRENT = False
+FILTER_TRANSMITTED = False
 PER_HAPLOTYPE = True
-FILTER_ELEMENT = True
-FILTER_SV = True
+FILTER_ELEMENT = False
+FILTER_SV = False
+FILTER_PHASED = False
 
 
 # define the assembly we're sourcing our DNMs from
+ASSEMBLY = "GRCh38"
 ASSEMBLY = "CHM13v2"
 
 # define the minimum size of events we want to consider
@@ -28,7 +30,7 @@ MIN_SIZE = 1
 
 # read in all per-sample DNM files
 mutations = []
-for fh in glob.glob(f"tr_validation/csv/orthogonal_support/*.{ASSEMBLY}.element.tsv"):
+for fh in glob.glob(f"tr_validation/csv/filtered_and_merged/*.{ASSEMBLY}.tsv"):
     df = pd.read_csv(fh, sep="\t", dtype={"sample_id": str})
     mutations.append(df)
 mutations = pd.concat(mutations).fillna({"children_with_denovo_allele": "unknown", "phase_summary": "unknown"})
@@ -48,8 +50,11 @@ denoms = denoms[denoms["sample_id"].isin(sample_ids)]
 
 # ensure we're looking at G3 DNMs
 mutations = mutations[mutations["paternal_id"] == 2209]
+
 mutations = mutations[np.abs(mutations["likely_denovo_size"]) >= MIN_SIZE]
 
+if FILTER_PHASED:
+    mutations = mutations[mutations["phase_summary"] != "unknown"]
 
 # if desired, remove recurrent sites
 if FILTER_RECURRENT:
@@ -92,7 +97,6 @@ if FILTER_ELEMENT:
     fail_trids = ortho[ortho["validation_status"] != "pass"]["trid"].unique()
     mutations = mutations[~mutations["trid"].isin(fail_trids)]
 
-
 # total bp in SVs in each sample
 if FILTER_SV:
     # read in manual validation CSVs
@@ -101,11 +105,9 @@ if FILTER_SV:
 
     per_sample_sv_rates = pass_sv.groupby("alt_sample_id").size().reset_index().rename(columns={0: "numerator"})
     per_sample_sv_rates["sample_id"] = per_sample_sv_rates["alt_sample_id"].apply(lambda s: alt2orig[s])
-    print (per_sample_sv_rates["numerator"].sum(), per_sample_sv_rates["numerator"].mean())
 
     sv_denoms = denoms.groupby(["sample_id"]).agg({"denominator": "sum"}).reset_index()
     per_sample_sv_rates = per_sample_sv_rates.merge(sv_denoms)
-    print (per_sample_sv_rates)
     per_sample_sv_rates["rate"] = per_sample_sv_rates["numerator"] / per_sample_sv_rates["denominator"]
     per_sample_sv_rates["ci_lo"] = per_sample_sv_rates.apply(lambda row: (ss.chi2.ppf(0.025, 2 * row["numerator"]) / 2.) / row["denominator"], axis=1)
     per_sample_sv_rates["ci_hi"] = per_sample_sv_rates.apply(lambda row: (ss.chi2.ppf(0.975, 2 * (row["numerator"] + 1)) / 2.) / row["denominator"], axis=1)
@@ -122,10 +124,8 @@ if FILTER_SV:
         )
         | (np.abs(mutations["likely_denovo_size"]) < 50)
     ]
-print ("after sv", mutations.shape)
 print ("### Total BP affected by TRs")
 total_bp_aff = mutations.groupby("sample_id").agg(total_bp=("likely_denovo_size", lambda s: sum(abs(s)))).reset_index()
-print (total_bp_aff)
 
 
 # sum denominators across chromosomes if necessary
@@ -137,6 +137,7 @@ if "chrom" in denoms:
     )
     if not PER_HAPLOTYPE:
         denoms["denominator"] /= 2
+
 
 per_sample_denoms = (
     denoms.groupby(
@@ -189,7 +190,6 @@ rate_sem = 1.96 * ss.sem(per_sample_rates["rate"].values)
 
 print (f"Mean rate = {rate_mean}, 95% CI = {rate_mean - rate_sem, rate_mean + rate_sem}")
 
-
 # group by simple motif size
 per_motif_denoms = (
     denoms.groupby(["sample_id", "simple_motif_size"])
@@ -222,7 +222,7 @@ per_motif_rates["ci_hi"] = per_motif_rates.apply(
     / row["denom_total"],
     axis=1,
 )
-print (per_motif_rates)
+
 
 # GROUP BY MOTIF AND TRANSMISSION
 per_motif_denoms = (
@@ -230,30 +230,30 @@ per_motif_denoms = (
     .agg({"denominator": "sum"})
     .reset_index()
 )
+
 per_motif_mutation_counts = (
     mutations.groupby(["sample_id", "motif_size"])
     .size()
     .reset_index()
     .rename(columns={0: "numerator"})
 )
+
 per_motif_rates = per_motif_mutation_counts.merge(per_motif_denoms)
 per_motif_rates["has_transmission"] = per_motif_rates["sample_id"].apply(lambda s: s in ("2189", "2216"))
 per_motif_rates = (
-    per_motif_rates.groupby(["motif_size", "has_transmission"])
+    per_motif_rates.groupby(["motif_size"])#, "has_transmission"])
     .agg(
         num_total=("numerator", "sum"),
         denom_total=("denominator", "sum"),
     )
     .reset_index()
 )
-print (per_motif_rates)
 
 per_motif_rates["rate"] = per_motif_rates["num_total"] / per_motif_rates["denom_total"]
 per_motif_rates["ci_lo"] = per_motif_rates.apply(lambda row: (ss.chi2.ppf(0.025, 2 * row["num_total"]) / 2.) / row["denom_total"], axis=1)
 per_motif_rates["ci_hi"] = per_motif_rates.apply(lambda row: (ss.chi2.ppf(0.975, 2 * (row["num_total"] + 1)) / 2.) / row["denom_total"], axis=1)
-print (per_motif_rates.groupby("has_transmission").agg({"num_total": "sum", "denom_total": "sum"}))
 
-
+print (per_motif_rates["num_total"].sum())
 # plot rates across samples
 f, ax = plt.subplots(figsize=(12, 5))
 
@@ -262,34 +262,35 @@ palette = {True: "goldenrod", False: "cornflowerblue"}
 
 params = {"linestyle": "-", "capthick":1, "ms":8, "capsize":2, "mec":"w", "fmt":"o"}
 
-for tm, tm_df in per_motif_rates.query("motif_size >= 1").groupby("has_transmission"):
+tm_df = per_motif_rates.query("motif_size >= 1 and motif_size <= 100")
+#for tm, tm_df in per_motif_rates.query("motif_size >= 1").groupby("has_transmission"):
 
-    x, y = tm_df[xcol], tm_df[ycol].values
-    err = tm_df[["ci_lo", "ci_hi"]].values.T
-    offsets = np.abs(err - y[None, :])
+x, y = tm_df[xcol], tm_df[ycol].values
+err = tm_df[["ci_lo", "ci_hi"]].values.T
+offsets = np.abs(err - y[None, :])
 
-    ax.fill_between(
-        x,
-        y1=err[0],
-        y2=err[1],
-        color=palette[tm],
-        alpha=0.1,
-    )
+ax.fill_between(
+    x,
+    y1=err[0],
+    y2=err[1],
+    color="gainsboro", # color=palette[tm],
+    alpha=0.5,
+)
 
-    ax.scatter(
-        x,
-        y,
-        c=palette[tm],
-        ec="w",
-        lw=0.5,
-        label=f"Transmitted" if tm else f"Not transmitted",
-    )
+ax.scatter(
+    x,
+    y,
+    c="dodgerblue", # c=palette[tm],
+    ec="w",
+    lw=0.5,
+    # label=f"Transmitted" if tm else f"Not transmitted",
+)
 
-    ax.plot(
-        x,
-        y,
-        c=palette[tm],
-    )
+ax.plot(
+    x,
+    y,
+    c="dodgerblue", # c=palette[tm],
+)
 
 # create inset ax
 ax_strs = inset_axes(
@@ -297,38 +298,41 @@ ax_strs = inset_axes(
     2.5,
     1.5,
     loc="upper left",
-    bbox_to_anchor=(0.65,0.3,.3,.3),
+    # bbox_to_anchor=(0.65, 0.3, .3, .3),
+    bbox_to_anchor=(0.075, 0.8, .3, .3),
     bbox_transform=ax.transAxes,
     axes_kwargs={"yscale": "log"},
 )
 
-for tm, tm_df in per_motif_rates.query("motif_size >= 1 and motif_size <= 6").groupby("has_transmission"):
+tm_df = per_motif_rates.query("motif_size >= 1 and motif_size <= 6")
 
-    x, y = tm_df[xcol], tm_df[ycol].values
-    err = tm_df[["ci_lo", "ci_hi"]].values.T
-    offsets = np.abs(err - y[None, :])
+# for tm, tm_df in per_motif_rates.query("motif_size >= 1 and motif_size <= 6").groupby("has_transmission"):
 
-    ax_strs.fill_between(
-        x,
-        y1=err[0],
-        y2=err[1],
-        color=palette[tm],
-        alpha=0.1,
-    )
+x, y = tm_df[xcol], tm_df[ycol].values
+err = tm_df[["ci_lo", "ci_hi"]].values.T
+offsets = np.abs(err - y[None, :])
 
-    ax_strs.scatter(
-        x,
-        y,
-        c=palette[tm],
-        ec="w",
-        lw=0.5,
-    )
+ax_strs.fill_between(
+    x,
+    y1=err[0],
+    y2=err[1],
+    color="gainsboro", # color=palette[tm],
+    alpha=0.5,
+)
 
-    ax_strs.plot(
-        x,
-        y,
-        c=palette[tm],
-    )
+ax_strs.scatter(
+    x,
+    y,
+    c="dodgerblue", # c=palette[tm],
+    ec="w",
+    lw=0.5,
+)
+
+ax_strs.plot(
+    x,
+    y,
+    c="dodgerblue", # c=palette[tm],
+)
 
 
 ax_strs.set_xlabel("Motif size (bp)")
@@ -336,7 +340,7 @@ ax_strs.set_ylabel(None)
 ax.set_yscale("log")
 ax.set_ylabel("Mutation rate\n(per locus, per haplotype\n per generation) +/- 95% CI")
 ax.set_xlabel("Motif size (bp)")
-ax.legend(fancybox=True, shadow=True, title="Validated via transmission to G4?")
+# ax.legend(fancybox=True, shadow=True, title="Validated via transmission to G4?")
 sns.despine(ax=ax)
 f.savefig("rates.poisson.png", dpi=200)
 f.savefig("rates.poisson.pdf")

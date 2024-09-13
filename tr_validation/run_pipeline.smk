@@ -53,7 +53,7 @@ PED_FILE = "tr_validation/data/file_mapping.csv"
 ped = pd.read_csv(PED_FILE, sep=",", dtype={"paternal_id": str, "maternal_id": str, "sample_id": str})
 
 ASSEMBLY = "CHM13v2"
-ASSEMBLY = "GRCh38"
+# ASSEMBLY = "GRCh38"
 
 TECH2PREF = {"ont": f"/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/ont-bams/{ASSEMBLY.split('v2')[0]}/", 
              "element": f"/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/element/{ASSEMBLY.split('v2')[0]}_bams/",
@@ -87,9 +87,8 @@ AWS_PREF = f"/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/TR
 rule all:
     input:
         expand("tr_validation/csv/filtered_and_merged/{SAMPLE}.{ASSEMBLY}.tsv", SAMPLE=CHILDREN, ASSEMBLY=[ASSEMBLY]),
-        # expand("tr_validation/csv/rates/{SAMPLE}.{ASSEMBLY}.denominator.tsv", SAMPLE=CHILDREN, ASSEMBLY=[ASSEMBLY]),
-        # expand("tr_validation/data/recurrent_trids.{ASSEMBLY}.complete.tsv", ASSEMBLY=[ASSEMBLY]),
-        # expand("tr_validation/csv/orthogonal_support/{SAMPLE}.{ASSEMBLY}.{TECH}.tsv", SAMPLE=SAMPLES, ASSEMBLY=[ASSEMBLY], TECH=["hifi", "element"]),
+        expand("tr_validation/csv/orthogonal_support/{SAMPLE}.{ASSEMBLY}.{TECH}.tsv", SAMPLE=CHILDREN, ASSEMBLY=[ASSEMBLY], TECH=["hifi", "element"]),
+        expand("tr_validation/csv/rates/{SAMPLE}.{ASSEMBLY}.denominator.tsv", SAMPLE=CHILDREN, ASSEMBLY=[ASSEMBLY]),
 
 
 rule prefilter_all_loci:
@@ -167,39 +166,20 @@ rule validate_all_loci:
         """
 
 
-rule annotate_with_al:
-    input:
-        py_script = "tr_validation/annotate_with_al.py",
-        kid_mutation_df = "tr_validation/trgt_denovo_out/{SAMPLE}.{ASSEMBLY}.hifi.denovo.csv",
-        dad_vcf = "tr_validation/data/trgt_out/{SAMPLE}.{ASSEMBLY}.hifi.dad.sorted.vcf.gz",
-        mom_vcf = "tr_validation/data/trgt_out/{SAMPLE}.{ASSEMBLY}.hifi.mom.sorted.vcf.gz",
-        kid_vcf = "tr_validation/data/trgt_out/{SAMPLE}.{ASSEMBLY}.hifi.kid.sorted.vcf.gz",
-    output:
-        "tr_validation/trgt_denovo_out/{SAMPLE}.{ASSEMBLY}.hifi.denovo.annotated.csv"
-    shell:
-        """
-        python {input.py_script} --mutations {input.kid_mutation_df} \
-                                 --dad_vcf {input.dad_vcf} \
-                                 --mom_vcf {input.mom_vcf} \
-                                 --kid_vcf {input.kid_vcf} \
-                                 --output {output}
-        """
-
 
 rule prefilter_denovos:
     input:
         py_script = "tr_validation/utils.py",
         ped = "tr_validation/data/file_mapping.csv",
         polymorphic_trids = POLYMORPHIC_TRIDS,
-        kid_mutation_df = "tr_validation/trgt_denovo_out/{SAMPLE}.{ASSEMBLY}.hifi.denovo.annotated.csv"
     output: 
         fh = "tr_validation/data/denovos/{SAMPLE}.{ASSEMBLY}.prefiltered.tsv"
     params:
-        # kid_mutation_df = lambda wildcards: AWS_PREF + "trgt-denovo/" + wildcards.SAMPLE + "_" + SMP2SUFF[wildcards.SAMPLE] + f"_{wildcards.ASSEMBLY.lower() if 'CHM' in wildcards.ASSEMBLY else wildcards.ASSEMBLY}" + "_50bp_merge_trgtdn.csv.gz",
+        kid_mutation_df = lambda wildcards: AWS_PREF + "trgt-denovo/" + wildcards.SAMPLE + "_" + SMP2SUFF[wildcards.SAMPLE] + f"_{wildcards.ASSEMBLY.lower() if 'CHM' in wildcards.ASSEMBLY else wildcards.ASSEMBLY}" + "_50bp_merge_trgtdn.csv.gz",
         annotations = lambda wildcards: ASSEMBLY2CATLOG[wildcards.ASSEMBLY],
     run:
         import pandas as pd
-        mutations = pd.read_csv(input.kid_mutation_df, sep="\t", dtype={"child_AL": str, 
+        mutations = pd.read_csv(params.kid_mutation_df, sep="\t", dtype={"child_AL": str, 
                                                                          "mother_AL": str, 
                                                                          "father_AL": str, 
                                                                          "per_allele_reads_mother": str, 
@@ -273,7 +253,6 @@ rule annotate_with_transmission:
 rule merge_all_dnm_files:
     input:
         raw_denovos = "tr_validation/data/denovos/{SAMPLE}.{ASSEMBLY}.prefiltered.tsv",
-        # grandparental_evidence = "tr_validation/data/denovos/{SAMPLE}.{ASSEMBLY}.grandparental.tsv",
         transmission_evidence = "tr_validation/data/denovos/{SAMPLE}.{ASSEMBLY}.transmission.tsv",
         phasing = "tr_validation/csv/phased/{SAMPLE}.{ASSEMBLY}.phased.2gen.tsv",
         py_script = "tr_validation/merge_mutations_with_metadata.py",
@@ -328,7 +307,8 @@ rule calculate_grouped_denominator:
     input:
         py_script = "tr_validation/calculate_grouped_denominator.py",
         insufficient_depth_sites = expand("tr_validation/data/insufficient_depth/{KID_ID}.tsv", KID_ID=ped["sample_id"].unique()),
-        polymorphic_trids = POLYMORPHIC_TRIDS
+        polymorphic_trids = POLYMORPHIC_TRIDS,
+        # utilities = "tr_validation/utils.py",
 
     output: "tr_validation/csv/rates/{SAMPLE}.{ASSEMBLY}.denominator.tsv"
     params:

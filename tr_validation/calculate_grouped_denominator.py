@@ -97,6 +97,7 @@ def main(args):
     
     res_df.to_csv(args.out, sep="\t", index=False)
 
+
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--mutations")
