@@ -6,48 +6,80 @@ import glob
 from annotate_with_orthogonal_evidence import annotate_with_concordance
 import utils
 import numpy as np
+import scipy.stats as ss
+
 
 plt.rc("font", size=14)
 
 TECH = "element"
-
-ASSEMBLY = "GRCh38"
-# ASSEMBLY = "CHM13v2"
-
-# read in denominators
-# denom = []
-# for fh in glob.glob(f"tr_validation/data/all_loci/orthogonal_support/*.{ASSEMBLY}.element.read_support.csv"):
-#     df = pd.read_csv(
-#         fh,
-#         dtype={"sample_id": str},
-#     )
-#     df = df[df["motif"].str.len() == 1]
-#     denom.append(df)
-
-# denom = pd.concat(denom)
-# print (denom.groupby("sample_id").size())
+ASSEMBLY = "CHM13v2"
+MIN_SIZE = 1
 
 # get mutations
 mutations = []
-for fh in glob.glob(f"tr_validation/csv/orthogonal_support/*.{ASSEMBLY}.element.tsv"):
+for fh in glob.glob(f"tr_validation/csv/orthogonal_support/*.{ASSEMBLY}.{TECH}.tsv"):
     df = pd.read_csv(
         fh,
         sep="\t",
         dtype={"sample_id": str},
     )
-    df = df[df["motif"].str.len() <= 6]
+    df = df[df["simple_motif_size"] == "STR"]
+    df = df[df["paternal_id"] == 2209]
+
     mutations.append(df)
 
 mutations = pd.concat(mutations)
+mutations = mutations[np.abs(mutations["likely_denovo_size"]) >= MIN_SIZE]
+mutations["is_phased"] = mutations["phase_summary"].apply(lambda p: "Y" if p != "unknown" else "N")
+mutations["is_phased_int"] = mutations["is_phased"].apply(lambda p: 1 if p == "Y" else 0)
 
-
-mutations = mutations.query("likely_denovo_size != 0")
-mutations["motif_size"] = mutations["motif"].str.len()
-mutations["is_homopolymer"] = mutations["motif_size"] == 1
-
-mutations = mutations[mutations["validation_status"] != "no_data"]
-print (mutations.groupby(["motif_size", "validation_status"]).size())
 print (mutations.groupby("validation_status").size())
-print (mutations.groupby(["is_homopolymer", "validation_status"]).size())
 
-print (mutations.head())
+
+# FILTERING
+mutations["max_al"] = mutations["child_AL"].apply(lambda a: max(map(int, a.split(","))))
+mutations = mutations[mutations["max_al"] <= 120]
+mutations = mutations[mutations["validation_status"] != "no_data"]
+
+
+mutations["is_homopolymer"] = mutations["max_motiflen"] == 1
+
+# fisher's exact test to see if phased stuff is more likely to be validated
+a_fore = mutations.query("validation_status == 'pass' and is_phased == 'Y'").shape[0]
+a_back = mutations.query("validation_status == 'fail' and is_phased == 'Y'").shape[0]
+b_fore = mutations.query("validation_status == 'pass' and is_phased == 'N'").shape[0]
+b_back = mutations.query("validation_status == 'fail' and is_phased == 'N'").shape[0]
+
+print (a_fore, a_back, b_fore, b_back)
+
+print (ss.fisher_exact([[a_fore, a_back], [b_fore, b_back]], alternative="greater"))
+
+# test size distribution of stuff that fails
+a, b = (
+    mutations[mutations["validation_status"] == "pass"]["is_phased_int"].values,
+    mutations[mutations["validation_status"] != "pass"]["is_phased_int"].values,
+)
+# print (a, b)
+print (ss.mannwhitneyu(abs(a), abs(b), alternative="greater"))
+
+mutations.to_csv("T2T.element.tsv", sep="\t", index=False)
+
+mutations["is_validated"] = mutations["validation_status"].apply(lambda v: 1 if v == "pass" else 0)
+
+f, ax = plt.subplots()
+sns.pointplot(
+    data=mutations,
+    x="is_phased",
+    y="is_validated",
+    hue="is_phased",
+    ax=ax,
+    dodge=True,
+    linestyle="none",
+)
+ax.set_xlabel("DNM has a confident POI?")
+ax.set_ylabel("Fraction of DNMs\nconsistent with Element data")
+sns.despine(ax=ax)
+f.tight_layout()
+f.savefig("ortho.png", dpi=200)
+
+print (mutations.groupby(["is_homopolymer", "validation_status"]).size())
