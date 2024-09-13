@@ -83,6 +83,7 @@ def add_likely_de_novo_size(row: pd.Series, use_phase: bool = True):
             abs_denovo_diffs = np.array([abs(denovo_al - al) for al in parent_als])
             denovo_diffs = np.array([denovo_al - al for al in parent_als])
             min_diff_idx = np.argmin(abs_denovo_diffs)
+
             # likely original AL
             return denovo_diffs[min_diff_idx]
     else:
@@ -104,9 +105,12 @@ def determine_motif_size(row: pd.Series):
 
     # all same
     if row["n_motifs"] == 1: return min_motif_len
-    else: return -1
-
-    # return min_motif_len if row["n_motifs"] == 1 else -1
+    else: 
+        # if it's complex and contains a homopolymer
+        if min_motif_len == 1:
+            return -1
+        else:
+            return -9
 
 def determine_simplified_motif_size(row: pd.Series):
     """returns index of the motif in a complex locus that is mutated"""
@@ -157,6 +161,7 @@ def filter_mutation_dataframe(
     mutations = mutations[~mutations["trid"].str.contains("Un|random", regex=True)]
 
     mutations["denovo_al"] = mutations.apply(lambda row: row["child_AL"].split(",")[row["index"]], axis=1)
+    # mutations["orig_al"] = mutations.apply(lambda row: row["child_AL"].split(",")[1 - row["index"]] if len(row["child_AL"].split(",")) == 2 else "haploid", axis=1)
 
     # remove sites where de novo AL is observed in a parent if we're interested
     # in filtering DNMs
@@ -182,17 +187,22 @@ def filter_mutation_dataframe(
             dup_cols.append("sample_id")
         mutations = mutations.drop_duplicates(dup_cols, keep="first")
 
-    # mutations["dad_ev"] = mutations["father_overlap_coverage"].apply(lambda o: sum(list(map(int, o.split(",")))))
-    # mutations["mom_ev"] = mutations["mother_overlap_coverage"].apply(lambda o: sum(list(map(int, o.split(",")))))
+    if parental_overlap_frac_max < 1:
 
-    mutations["dad_dp"] = mutations["per_allele_reads_father"].apply(lambda o: sum(list(map(int, o.split(",")))))
-    mutations["mom_dp"] = mutations["per_allele_reads_mother"].apply(lambda o: sum(list(map(int, o.split(",")))))
 
-    # calculate fraction of reads supporting the denovo in the parents
-    # mutations["parental_overlap_coverage_total"] = mutations["dad_ev"] + mutations["mom_ev"]
-    # mutations["parental_coverage_total"] = mutations["mom_dp"] + mutations["dad_dp"]
-    # mutations["parental_overlap_coverage_frac"] = mutations["parental_overlap_coverage_total"] / mutations["parental_coverage_total"]
-    # mutations = mutations.query(f"parental_overlap_coverage_frac <= {parental_overlap_frac_max}")
+        mutations["dad_ev"] = mutations["father_overlap_coverage"].apply(lambda o: sum(list(map(int, o.split(",")))))
+        mutations["mom_ev"] = mutations["mother_overlap_coverage"].apply(lambda o: sum(list(map(int, o.split(",")))))
+
+        mutations["dad_dp"] = mutations["per_allele_reads_father"].apply(lambda o: sum(list(map(int, o.split(",")))))
+        mutations["mom_dp"] = mutations["per_allele_reads_mother"].apply(lambda o: sum(list(map(int, o.split(",")))))
+
+        mutations["parental_ev"] = mutations["dad_ev"] + mutations["mom_ev"]
+        mutations["parental_dp"] = mutations["dad_dp"] + mutations["mom_dp"]
+
+
+        mutations["parental_ev_frac"] = mutations["parental_ev"] / mutations["parental_dp"]
+
+        mutations = mutations[mutations["parental_ev_frac"] <= parental_overlap_frac_max]
 
     # if we want to remove grandparental evidence
     if remove_gp_ev and "gp_ev" in mutations.columns:
