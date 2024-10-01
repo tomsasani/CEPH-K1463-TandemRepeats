@@ -2,7 +2,7 @@ import pandas as pd
 import argparse
 from typing import List
 from collections import defaultdict
-
+import numpy as np
 
 def annotate_with_concordance(row: pd.Series) -> str:
     """given orthogonal evidence at a locus, figure out whether
@@ -62,8 +62,8 @@ def annotate_with_concordance(row: pd.Series) -> str:
         "pass"
         if (
             out_dict_off_by_one["kid"] >= 1
-            and out_dict["mom"] == 0
-            and out_dict["dad"] == 0
+            and out_dict_off_by_one["mom"] == 0
+            and out_dict_off_by_one["dad"] == 0
         )
         else "fail"
     )
