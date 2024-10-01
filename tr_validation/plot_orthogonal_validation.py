@@ -2,10 +2,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
-import utils
-from sklearn.mixture import GaussianMixture
 import glob
-from annotate_with_orthogonal_evidence import annotate_with_concordance
 
 
 ASSEMBLY = "CHM13v2"
@@ -25,12 +22,12 @@ for fh in glob.glob(f"tr_validation/csv/orthogonal_support/*.{ASSEMBLY}.{TECH}.t
 
 
 mutations = pd.concat(mutations)
-mutations = mutations[~mutations["sample_id"].str.startswith("200")]
+# mutations = mutations[~mutations["sample_id"].str.startswith("200")]
+mutations = mutations[mutations["paternal_id"] == 2209]
 
 # FILTERING
 mutations = mutations[np.abs(mutations["likely_denovo_size"]) >= MIN_SIZE]
 mutations = mutations[mutations["motif_size"] >= 6]
-mutations = mutations[mutations["#chrom"] != "chrX"]
 mutations["reference_al"] = mutations["end"] - mutations["start"]
 
 # calculate child-to-reference diff
@@ -41,7 +38,8 @@ mutations["child_to_parent_diff"] = mutations["likely_denovo_size"]
 
 mutations["is_homopolymer"] = mutations["max_motiflen"] == 1
 
-mutations = mutations[(mutations["is_homopolymer"] == False) & (mutations["validation_status"] != "no_data")]
+mutations = mutations[mutations["validation_status"] != "no_data"]
+
 
 mutations = mutations.sort_values(["alt_sample_id", "trid"])
 
@@ -49,8 +47,10 @@ for (sample, trid, genotype), trid_df in mutations.groupby(
     ["alt_sample_id", "trid", "genotype"]
 ):
     validation = trid_df["validation_status"].unique()[0]
-    motif_size = trid_df["min_motiflen"].values[0]
+    motif_size = trid_df["max_motiflen"].values[0]
     poi = trid_df["phase_summary"].unique()[0]
+    size = trid_df["likely_denovo_size"].unique()[0]
+    is_homopolymer = trid_df["is_homopolymer"].unique()[0]
 
     if poi != "unknown":
         poi = poi.split(":")[0] if int(poi.split(":")[1]) > 5 else "unknown"
@@ -130,7 +130,7 @@ for (sample, trid, genotype), trid_df in mutations.groupby(
     ax.set_xlabel("Sample")
     ax.set_xticks(range(3))
     ax.set_xticklabels(["Kid", "Mom", "Dad"])
-    ax.set_title(f"{trid}\nMotif size = {motif_size}")
+    ax.set_title(f"{trid}\nMotif size = {motif_size}\n{size}")
     # ax.legend()
     sns.despine(ax=ax)
     f.savefig(
