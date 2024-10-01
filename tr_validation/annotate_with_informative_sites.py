@@ -39,19 +39,21 @@ def var_pass(
     # require minimum genotype quality and depth
     if np.any(v.gt_quals[idxs] < min_gq): return False
     
-    td = v.format("DP")
-    if np.any(td[idxs] < min_depth): return False
+    # td = v.format("DP")
+    # if np.any(td[idxs] < min_depth): return False
 
+    ad, rd = v.gt_alt_depths, v.gt_ref_depths
+    td = ad + rd
     # calculate allele balance, and require reasonable
     # allele balance for HOM_REF/HET/HOM_ALT
-    # ab = ad / td
-    # gts = v.gt_types
-    # # filter UNK genotypes
-    # if np.any(gts[idxs] == 3): return False
-    # for idx in idxs:
-    #     min_ab, max_ab = GT2ALT_AB[gts[idx]]
-    #     if not (min_ab <= ab[idx] <= max_ab):
-    #         return False
+    ab = ad / td
+    gts = v.gt_types
+    # filter UNK genotypes
+    if np.any(gts[idxs] == 3): return False
+    for idx in idxs:
+        min_ab, max_ab = GT2ALT_AB[gts[idx]]
+        if not (min_ab <= ab[idx] <= max_ab):
+            return False
 
     return True
 
@@ -91,13 +93,13 @@ def catalog_informative_sites(
     for v in vcf(region):
         
         # make sure variant passes basic filters
-        # if not var_pass(
-        #     v,
-        #     np.array([dad_idx, mom_idx, kid_idx]),
-        #     min_depth=5,
-        #     min_gq=20,
-        # ):
-        #     continue
+        if not var_pass(
+            v,
+            np.array([dad_idx, mom_idx, kid_idx]),
+            min_depth=10,
+            min_gq=20,
+        ):
+            continue
 
         # access unphased genotypes in kid, mom, and dad
         gts = v.gt_types
@@ -240,7 +242,7 @@ def main(args):
     KID_STR_VCF = VCF(args.str_vcf, gts012=True)
     SNP_VCF = VCF(args.joint_snp_vcf, gts012=True)
 
-    SLOP = 50_000
+    SLOP = 500_000
 
     SMP2IDX = dict(zip(SNP_VCF.samples, range(len(SNP_VCF.samples))))
 
