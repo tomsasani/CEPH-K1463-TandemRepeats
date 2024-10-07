@@ -86,9 +86,9 @@ AWS_PREF = f"/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/TR
 
 rule all:
     input:
-        expand("tr_validation/csv/filtered_and_merged/{SAMPLE}.{ASSEMBLY}.tsv", SAMPLE=CHILDREN, ASSEMBLY=[ASSEMBLY]),
-        expand("tr_validation/csv/orthogonal_support/{SAMPLE}.{ASSEMBLY}.{TECH}.tsv", SAMPLE=CHILDREN, ASSEMBLY=[ASSEMBLY], TECH=["hifi", "element"]),
-        expand("tr_validation/csv/rates/{SAMPLE}.{ASSEMBLY}.denominator.tsv", SAMPLE=CHILDREN, ASSEMBLY=[ASSEMBLY]),
+        expand("tr_validation/csv/filtered_and_merged/{SAMPLE}.{ASSEMBLY}.tsv", SAMPLE=SAMPLES, ASSEMBLY=[ASSEMBLY]),
+        expand("tr_validation/csv/orthogonal_support/{SAMPLE}.{ASSEMBLY}.{TECH}.tsv", SAMPLE=SAMPLES, ASSEMBLY=[ASSEMBLY], TECH=["hifi", "element"]),
+        expand("tr_validation/csv/rates/{SAMPLE}.{ASSEMBLY}.denominator.tsv", SAMPLE=SAMPLES, ASSEMBLY=[ASSEMBLY]),
         expand("tr_validation/data/denovos/orthogonal_support_recurrent/{SAMPLE}.{ASSEMBLY}.{TECH}.read_support.csv", SAMPLE=CHILDREN, ASSEMBLY=[ASSEMBLY], TECH=["hifi"])
 
 rule prefilter_all_loci:
@@ -189,6 +189,12 @@ rule prefilter_denovos:
                                                                          "mother_overlap_coverage": str})
         mutations["sample_id"] = wildcards.SAMPLE
 
+        # trids_to_use = []
+        # with open(input.polymorphic_trids, "r") as infh:
+        #     for l in infh:
+        #         trids_to_use.append(l.strip())
+        # mutations = mutations[mutations["trid"].isin(trids_to_use)]
+
         file_mapping = pd.read_csv(input.ped, dtype={"sample_id": str})
         mutations = mutations.merge(file_mapping)
 
@@ -256,6 +262,8 @@ rule merge_all_dnm_files:
         transmission_evidence = "tr_validation/data/denovos/{SAMPLE}.{ASSEMBLY}.transmission.tsv",
         phasing = "tr_validation/csv/phased/{SAMPLE}.{ASSEMBLY}.phased.2gen.tsv",
         py_script = "tr_validation/merge_mutations_with_metadata.py",
+        recurrents = "tr_validation/data/recurrent_trids.{ASSEMBLY}.tsv",
+        denominator = "tr_validation/csv/rates/{SAMPLE}.{ASSEMBLY}.denominator.tsv",
     output: "tr_validation/csv/filtered_and_merged/{SAMPLE}.{ASSEMBLY}.tsv"
     shell:
         """
@@ -308,8 +316,6 @@ rule calculate_grouped_denominator:
         py_script = "tr_validation/calculate_grouped_denominator.py",
         insufficient_depth_sites = expand("tr_validation/data/insufficient_depth/{KID_ID}.tsv", KID_ID=ped["sample_id"].unique()),
         polymorphic_trids = POLYMORPHIC_TRIDS,
-        # utilities = "tr_validation/utils.py",
-
     output: "tr_validation/csv/rates/{SAMPLE}.{ASSEMBLY}.denominator.tsv"
     params:
         kid_unfiltered_mutation_df = lambda wildcards: AWS_PREF + "trgt-denovo/" + wildcards.SAMPLE + "_" + SMP2SUFF[wildcards.SAMPLE] + f"_{wildcards.ASSEMBLY.lower() if 'CHM' in wildcards.ASSEMBLY else wildcards.ASSEMBLY}" + "_50bp_merge_trgtdn.csv.gz",
