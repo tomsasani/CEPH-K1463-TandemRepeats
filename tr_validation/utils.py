@@ -101,16 +101,8 @@ def determine_motif_size(row: pd.Series):
     """returns index of the motif in a complex locus that is mutated"""
     
     min_motif_len = row["min_motiflen"]
-    max_motif_len = row["max_motiflen"]
 
-    # all same
-    if row["n_motifs"] == 1: return min_motif_len
-    else: 
-        # if it's complex and contains a homopolymer
-        if min_motif_len == 1:
-            return -1
-        else:
-            return -9
+    return min_motif_len
 
 def determine_simplified_motif_size(row: pd.Series):
     """returns index of the motif in a complex locus that is mutated"""
@@ -161,7 +153,6 @@ def filter_mutation_dataframe(
     mutations = mutations[~mutations["trid"].str.contains("Un|random", regex=True)]
 
     mutations["denovo_al"] = mutations.apply(lambda row: row["child_AL"].split(",")[row["index"]], axis=1)
-    # mutations["orig_al"] = mutations.apply(lambda row: row["child_AL"].split(",")[1 - row["index"]] if len(row["child_AL"].split(",")) == 2 else "haploid", axis=1)
 
     # remove sites where de novo AL is observed in a parent if we're interested
     # in filtering DNMs
