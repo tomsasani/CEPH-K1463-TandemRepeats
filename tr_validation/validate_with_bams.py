@@ -242,9 +242,12 @@ def main(args):
         denovo_al = allele_lengths[denovo_idx]
         non_denovo_al = None
 
-        # if we're on a male X, there's only one AL
-        is_male_x = len(allele_lengths) == 1#chrom == "chrX" and row_dict["suffix"].startswith("S")
-        if is_male_x:
+        # if we're on a male X, there's only one AL.
+        # we'll just define a "dummy" non denovo AL for
+        # the purposes of this script, though it's not
+        # used for anything in particular.
+        is_male_sex_chrom = len(allele_lengths) == 1
+        if is_male_sex_chrom:
             non_denovo_al = 1 * denovo_al
         else:
             non_denovo_al = allele_lengths[1 - denovo_idx]
