@@ -93,13 +93,13 @@ def catalog_informative_sites(
     for v in vcf(region):
         
         # make sure variant passes basic filters
-        if not var_pass(
-            v,
-            np.array([dad_idx, mom_idx, kid_idx]),
-            min_depth=10,
-            min_gq=20,
-        ):
-            continue
+        # if not var_pass(
+        #     v,
+        #     np.array([dad_idx, mom_idx, kid_idx]),
+        #     min_depth=10,
+        #     min_gq=20,
+        # ):
+        #     continue
 
         # access unphased genotypes in kid, mom, and dad
         gts = v.gt_types
