@@ -36,7 +36,7 @@ def main(args):
     raw_loci = utils.filter_mutation_dataframe(
         raw_loci,
         remove_complex=False,
-        remove_duplicates=False,
+        remove_duplicates=True,
         remove_gp_ev=False,
         remove_inherited=False,
         parental_overlap_frac_max=1,
