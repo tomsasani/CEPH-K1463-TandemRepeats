@@ -29,7 +29,7 @@ plt.rc("font", size=12)
 # define some global variables we'll access for filtering
 FILTER_TRANSMITTED = False
 PER_HAPLOTYPE = True
-FILTER_RECURRENT = False
+FILTER_RECURRENT = True
 PER_HAPLOTYPE = True
 FILTER_ELEMENT = True
 FILTER_SV = True
@@ -291,5 +291,5 @@ def plot_mutation_rate_vs(
     # f.tight_layout()
     f.savefig(outname)#, dpi=200)
 
-plot_mutation_rate_vs(mutations, denoms, colname="motif_size", plot_strs=True, outname="motif_size.rates.png")
+plot_mutation_rate_vs(mutations, denoms, colname="motif_size", plot_strs=True, outname="motif_size.rates.pdf")
 plot_mutation_rate_vs(mutations, denoms, colname="reflen_bin", plot_strs=False, outname="reflen.rates.svg")

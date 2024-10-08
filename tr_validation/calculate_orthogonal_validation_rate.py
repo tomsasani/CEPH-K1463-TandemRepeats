@@ -1,10 +1,7 @@
 import pandas as pd
-from utils import filter_mutation_dataframe
 import matplotlib.pyplot as plt
 import seaborn as sns
 import glob
-from annotate_with_orthogonal_evidence import annotate_with_concordance
-import utils
 import numpy as np
 import scipy.stats as ss
 
@@ -33,16 +30,13 @@ mutations = mutations[np.abs(mutations["likely_denovo_size"]) >= MIN_SIZE]
 mutations["is_phased"] = mutations["phase_summary"].apply(lambda p: "Y" if p != "unknown" else "N")
 mutations["is_phased_int"] = mutations["is_phased"].apply(lambda p: 1 if p == "Y" else 0)
 
-print (mutations.groupby("validation_status").size())
-
-
 # FILTERING
 mutations["max_al"] = mutations["child_AL"].apply(lambda a: max(map(int, a.split(","))))
 mutations = mutations[mutations["max_al"] <= 120]
 mutations = mutations[mutations["validation_status"] != "no_data"]
-
-
 mutations["is_homopolymer"] = mutations["max_motiflen"] == 1
+
+print (mutations.groupby(["is_homopolymer", "validation_status"]).size())
 
 # fisher's exact test to see if phased stuff is more likely to be validated
 a_fore = mutations.query("validation_status == 'pass' and is_phased == 'Y'").shape[0]
@@ -51,18 +45,7 @@ b_fore = mutations.query("validation_status == 'pass' and is_phased == 'N'").sha
 b_back = mutations.query("validation_status == 'fail' and is_phased == 'N'").shape[0]
 
 print (a_fore, a_back, b_fore, b_back)
-
 print (ss.fisher_exact([[a_fore, a_back], [b_fore, b_back]], alternative="greater"))
-
-# test size distribution of stuff that fails
-a, b = (
-    mutations[mutations["validation_status"] == "pass"]["is_phased_int"].values,
-    mutations[mutations["validation_status"] != "pass"]["is_phased_int"].values,
-)
-# print (a, b)
-print (ss.mannwhitneyu(abs(a), abs(b), alternative="greater"))
-
-mutations.to_csv("T2T.element.tsv", sep="\t", index=False)
 
 mutations["is_validated"] = mutations["validation_status"].apply(lambda v: 1 if v == "pass" else 0)
 
@@ -81,5 +64,3 @@ ax.set_ylabel("Fraction of DNMs\nconsistent with Element data")
 sns.despine(ax=ax)
 f.tight_layout()
 f.savefig("ortho.png", dpi=200)
-
-print (mutations.groupby(["is_homopolymer", "validation_status"]).size())

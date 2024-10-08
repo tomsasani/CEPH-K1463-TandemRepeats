@@ -191,7 +191,7 @@ def filter_mutation_dataframe(
         mutations["parental_dp"] = mutations["dad_dp"] + mutations["mom_dp"]
 
 
-        mutations["parental_ev_frac"] = mutations["parental_ev"] / mutations["parental_dp"]
+        mutations["parental_ev_frac"] = mutations["parental_ev"].values / mutations["parental_dp"].values
 
         mutations = mutations[mutations["parental_ev_frac"] <= parental_overlap_frac_max]
 

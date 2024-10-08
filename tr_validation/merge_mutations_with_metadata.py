@@ -44,6 +44,5 @@ if __name__ == "__main__":
     p.add_argument("--transmission_evidence")
     p.add_argument("--phasing")
     p.add_argument("--out")
-    p.add_argument("--assembly")
     args = p.parse_args()
     main(args)

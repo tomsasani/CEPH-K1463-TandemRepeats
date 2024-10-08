@@ -26,7 +26,13 @@ mutations["Motif type"] = mutations["motif_size"].apply(lambda m: "STR" if m <= 
 mutations["Likely DNM size"] = mutations["likely_denovo_size"]
 mutations["Parent-of-origin"] = mutations["phase_summary"].apply(lambda p: p.split(":")[0] if p != "unknown" else "unknown")
 
-mutations["DNM event size (# of motifs)"] = mutations["likely_denovo_size"] // mutations["motif_size"]
+
+# test for expansions vs contractions
+n_expansions = mutations.query("likely_denovo_size > 0").shape[0]
+n_contractions = mutations.query("likely_denovo_size < 0").shape[0]
+
+print (ss.binomtest(n_expansions, n_expansions + n_contractions, alternative="greater"))
+
 
 val = "likely_denovo_size"
 

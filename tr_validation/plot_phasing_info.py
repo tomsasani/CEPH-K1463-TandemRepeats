@@ -3,10 +3,18 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import numpy as np
 from typing import List
-import glob
 
 
 plt.rc("font", size=14)
+
+def check_phase(p):
+    if p == "unknown": return p
+    else:
+        support = int(p.split(":")[1])
+        if support < 1:
+            return "unknown"
+        else:
+            return p.split(":")[0]
 
 def calculate_phase_counts(df: pd.DataFrame, group_cols: List[str] = ["sample_id", "phase"]):
     phase_counts = df.groupby(group_cols).size().reset_index().rename(columns={0: "count"})
@@ -21,17 +29,13 @@ def calculate_phase_counts(df: pd.DataFrame, group_cols: List[str] = ["sample_id
     phase_counts["fraction"] = phase_counts["count"] / phase_counts["total"]
     return phase_counts
 
+ASSEMBLY = "GRCh38"
 ASSEMBLY = "CHM13v2"
 
-mutations = []
-for fh in glob.glob(f"tr_validation/csv/filtered_and_merged/*.{ASSEMBLY}.tsv"):
-    df = pd.read_csv(fh, sep="\t", dtype={"sample_id": str})
-    mutations.append(df)
-mutations = pd.concat(mutations).fillna({"children_with_denovo_allele": "unknown", "phase_summary": "unknown"})
 
-mutations = mutations[mutations["paternal_id"] == 2209]
+mutations = pd.read_csv(f"tr_validation/csv/mutations.{ASSEMBLY}.filtered.csv", dtype={"sample_id": str})
 
-mutations["combined_phase"] = mutations["phase_summary"].apply(lambda p: p.split(":")[0])
+mutations["combined_phase"] = mutations["phase_summary"].apply(lambda p: check_phase(p))
 
 mutations["is_transmitted"] = mutations.apply(
     lambda row: (
@@ -52,8 +56,6 @@ ped = pd.read_csv(
 )
 
 sample2dad = dict(zip(ped["sample_id"], ped["paternal_id"]))
-mutations["dad_sample_id"] = mutations["sample_id"].apply(lambda s: sample2dad[s])
-
 
 # remove unphased
 REMOVE_UNPHASED = True
@@ -66,11 +68,13 @@ phase_counts = calculate_phase_counts(
     group_cols=["alt_sample_id", "is_transmitted", "combined_phase"],
 )
 
+
 phase_counts_totals = calculate_phase_counts(mutations, group_cols=["alt_sample_id", "combined_phase"])
 ages = pd.read_csv("tr_validation/data/k20_parental_age_at_birth.csv", dtype={"sample_id": str, "UGRP Lab ID (archive)": str})
 
 order = phase_counts.groupby("alt_sample_id").agg({"count": "sum"}).sort_values("count").reset_index()["alt_sample_id"].to_list()
-order2idx = dict(zip(order, range(len(order))))
+order2idx = dict(zip(list(map(str, order)), range(len(order))))
+
 
 # order according to michelle's diagram
 order2idx = dict(
@@ -89,12 +93,15 @@ order2idx = dict(
     )
 )
 
-phase_counts["order_idx"] = phase_counts["alt_sample_id"].apply(lambda s: order2idx[s])
+phase_counts["order_idx"] = phase_counts["alt_sample_id"].apply(lambda s: order2idx[str(s)])
 
 ind = np.arange(phase_counts["alt_sample_id"].nunique())
 bottom = np.zeros(ind.shape[0])
 
-f, ax = plt.subplots(figsize=(8, 6))
+f, ax = plt.subplots(figsize=(8, 7))
+
+
+print (phase_counts.groupby("combined_phase").agg({"count": "sum"}))
 
 for (phase, transmission), phase_df in phase_counts.groupby(["combined_phase", "is_transmitted"]):
     sorted_phase_df = phase_df.sort_values("order_idx")
@@ -121,12 +128,12 @@ for (phase, transmission), phase_df in phase_counts.groupby(["combined_phase", "
 
     bottom += vals
 
-ax.set_xlim(0, 100)
+# ax.set_xlim(0, 300)
 ax.set_yticks(ind)
 ax.set_yticklabels(phase_counts.drop_duplicates("alt_sample_id").sort_values("order_idx")["alt_sample_id"].unique())
 ax.set_ylabel("Sample ID")
 ax.set_xlabel("Number of phased TR DNMs")
-ax.legend(title="Parent-of-origin", fancybox=True, shadow=True, fontsize=12, loc="center left", bbox_to_anchor=(0.7, 0.4))
+ax.legend(title="Parent-of-origin", fancybox=True, shadow=True, fontsize=12)#, loc="center left", bbox_to_anchor=(0.7, 0.4))
 ax.tick_params(axis='y', which='both',length=0)
 sns.despine(ax=ax, left=True)
 

@@ -53,7 +53,7 @@ PED_FILE = "tr_validation/data/file_mapping.csv"
 ped = pd.read_csv(PED_FILE, sep=",", dtype={"paternal_id": str, "maternal_id": str, "sample_id": str})
 
 ASSEMBLY = "CHM13v2"
-# ASSEMBLY = "GRCh38"
+ASSEMBLY = "GRCh38"
 
 TECH2PREF = {"ont": f"/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/ont-bams/{ASSEMBLY.split('v2')[0]}/", 
              "element": f"/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/element/{ASSEMBLY.split('v2')[0]}_bams/",
@@ -88,7 +88,6 @@ rule all:
     input:
         expand("tr_validation/csv/filtered_and_merged/{SAMPLE}.{ASSEMBLY}.tsv", SAMPLE=SAMPLES, ASSEMBLY=[ASSEMBLY]),
         expand("tr_validation/csv/orthogonal_support/{SAMPLE}.{ASSEMBLY}.{TECH}.tsv", SAMPLE=SAMPLES, ASSEMBLY=[ASSEMBLY], TECH=["hifi", "element"]),
-        expand("tr_validation/csv/rates/{SAMPLE}.{ASSEMBLY}.denominator.tsv", SAMPLE=SAMPLES, ASSEMBLY=[ASSEMBLY]),
         expand("tr_validation/data/denovos/orthogonal_support_recurrent/{SAMPLE}.{ASSEMBLY}.{TECH}.read_support.csv", SAMPLE=CHILDREN, ASSEMBLY=[ASSEMBLY], TECH=["hifi"])
 
 rule prefilter_all_loci:
@@ -314,7 +313,6 @@ rule merge_with_orthogonal_evidence:
 rule calculate_grouped_denominator:
     input:
         py_script = "tr_validation/calculate_grouped_denominator.py",
-        insufficient_depth_sites = expand("tr_validation/data/insufficient_depth/{KID_ID}.tsv", KID_ID=ped["sample_id"].unique()),
         polymorphic_trids = POLYMORPHIC_TRIDS,
     output: "tr_validation/csv/rates/{SAMPLE}.{ASSEMBLY}.denominator.tsv"
     params:
