@@ -53,7 +53,7 @@ PED_FILE = "tr_validation/data/file_mapping.csv"
 ped = pd.read_csv(PED_FILE, sep=",", dtype={"paternal_id": str, "maternal_id": str, "sample_id": str})
 
 ASSEMBLY = "CHM13v2"
-ASSEMBLY = "GRCh38"
+# ASSEMBLY = "GRCh38"
 
 TECH2PREF = {"ont": f"/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/ont-bams/{ASSEMBLY.split('v2')[0]}/", 
              "element": f"/scratch/ucgd/lustre-work/quinlan/data-shared/datasets/Palladium/element/{ASSEMBLY.split('v2')[0]}_bams/",
@@ -88,7 +88,8 @@ rule all:
     input:
         expand("tr_validation/csv/filtered_and_merged/{SAMPLE}.{ASSEMBLY}.tsv", SAMPLE=SAMPLES, ASSEMBLY=[ASSEMBLY]),
         expand("tr_validation/csv/orthogonal_support/{SAMPLE}.{ASSEMBLY}.{TECH}.tsv", SAMPLE=SAMPLES, ASSEMBLY=[ASSEMBLY], TECH=["hifi", "element"]),
-        expand("tr_validation/data/denovos/orthogonal_support_recurrent/{SAMPLE}.{ASSEMBLY}.{TECH}.read_support.csv", SAMPLE=CHILDREN, ASSEMBLY=[ASSEMBLY], TECH=["hifi"])
+        expand("tr_validation/data/denovos/orthogonal_support_recurrent/{SAMPLE}.{ASSEMBLY}.{TECH}.read_support.csv", SAMPLE=CHILDREN, ASSEMBLY=[ASSEMBLY], TECH=["hifi"]),
+        expand("tr_validation/csv/phased/{SAMPLE}.{ASSEMBLY}.phased.3gen.tsv", SAMPLE=["2189", "2216"], ASSEMBLY=[ASSEMBLY]),
 
 rule prefilter_all_loci:
     input:
