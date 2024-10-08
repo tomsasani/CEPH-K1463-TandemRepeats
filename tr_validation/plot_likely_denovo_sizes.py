@@ -17,96 +17,56 @@ ASSEMBLY = "CHM13v2"
 # define the minimum size of events we want to consider
 # (i.e., if MIN_SIZE = 1, don't include interruptions)
 MIN_SIZE = 1
-MAX_SIZE = 25
+MAX_SIZE = 20
 
-# read in all per-sample DNM files
-mutations = []
-for fh in glob.glob(f"tr_validation/csv/filtered_and_merged/*.{ASSEMBLY}.tsv"):
-    df = pd.read_csv(fh, sep="\t", dtype={"sample_id": str})
-    mutations.append(df)
-mutations = pd.concat(mutations).fillna({"children_with_denovo_allele": "unknown", "phase_summary": "unknown"})
-
-# ensure we're looking at G3 DNMs
-mutations = mutations[mutations["paternal_id"] == 2209]
-samples = mutations["sample_id"].unique()
+mutations = pd.read_csv(f"tr_validation/csv/mutations.{ASSEMBLY}.filtered.csv", dtype={"sample_id": str})
 
 mutations = mutations[np.abs(mutations["likely_denovo_size"]).between(MIN_SIZE, MAX_SIZE)]
-mutations["Motif type"] = mutations["simple_motif_size"]
+mutations["Motif type"] = mutations["motif_size"].apply(lambda m: "STR" if m <= 6 else "VNTR")
 mutations["Likely DNM size"] = mutations["likely_denovo_size"]
 mutations["Parent-of-origin"] = mutations["phase_summary"].apply(lambda p: p.split(":")[0] if p != "unknown" else "unknown")
 
-bins = np.arange(mutations["likely_denovo_size"].min(), mutations["likely_denovo_size"].max(), 1)
+mutations["DNM event size (# of motifs)"] = mutations["likely_denovo_size"] // mutations["motif_size"]
 
-print (mutations.groupby(["motif_size", "likely_denovo_size"]).size())
+val = "likely_denovo_size"
 
-f, ax = plt.subplots(figsize=(5, 12))
-#sns.stripplot(data=mutations[mutations["motif_size"].between(1, 10)], x="motif_size", y="likely_denovo_size", alpha=0.5, ax=ax)
-sns.stripplot(data=mutations[mutations["likely_denovo_size"].between(-5, 5)], x="likely_denovo_size", y="motif_size", alpha=0.5, ax=ax)
-f.savefig("test.png")
+bins = np.arange(mutations[val].min(), mutations[val].max(), 1)
 
-mutations = mutations.groupby(["sample_id",  "likely_denovo_size"]).size().reset_index().rename(columns={0: "count"})
-totals = mutations.groupby("sample_id").size().reset_index().rename(columns={0: "total"})
-mutations = mutations.merge(totals)
-mutations["frac"] = mutations["count"] / mutations["total"]
+sample_ids = mutations["sample_id"].unique()
+f, ax = plt.subplots(figsize=(8, 4))
 
-f, ax = plt.subplots()
+counts = np.zeros((MAX_SIZE * 2 - 1, len(sample_ids)))
 
-sns.pointplot(data=mutations, x = "likely_denovo_size", y="frac", ax=ax)
-# for i, (motif_class, motif_df) in enumerate(mutations.groupby("simple_motif_size")):
-#     bottom = np.zeros(bins.shape[0])
+cmap = sns.color_palette("colorblind", len(mutations["sample_id"].unique()))
 
-#     for sample, sample_df in motif_df.groupby("sample_id"):
-#         sizes = sample_df["likely_denovo_size"].values
-#         hist, edges = np.histogram(sizes, bins=bins)
-#         axarr[i].bar(bins[:-1], hist, 1, bottom=bottom[:-1], ec="w", lw=0.5, label=sample)
-#         bottom[:-1] += hist
-#     axarr[i].set_title(motif_class)
-#     axarr[i].set_ylabel("# of TR DNMs")
-#     if i == 0:
-#         axarr[i].legend(shadow=True, fancybox=True, title="Sample ID")
-#     if i == 2:
-#         axarr[i].set_xlabel("TR DNM size (bp)")
-#     sns.despine(ax=axarr[i])
-# # g = sns.FacetGrid(data=mutations, col="Motif type")
-# # g.map(sns.histplot, "Likely DNM size", bins=bins, hue="sample_id", lw=1, edgecolor="w", stat="proportion")
-# #ax.set_xlabel("Likely DNM size (bp)")
-# f.tight_layout()
+for si, (sample, sample_df) in enumerate(mutations.groupby("sample_id")):
+    sizes = sample_df["likely_denovo_size"].values
+    hist, edges = np.histogram(sizes, bins=bins)
+    counts[:, si] = hist
+
+fracs = counts / np.sum(counts, axis=0)[None, :]
+
+fracs[MAX_SIZE, :] = np.nan
+
+mean_count = np.mean(fracs, axis=1)
+std_count = np.std(fracs, axis=1)
+sem_count = 1.96 * ss.sem(fracs, axis=1)
+
+ax.plot(bins[:-1], mean_count, lw=1, c="gainsboro", zorder=-1)
+ax.scatter(bins[:-1], mean_count, s=50, ec="w", c="dodgerblue")
+ax.errorbar(
+    bins[:-1],
+    mean_count,
+    lw=1,
+    fmt="none",
+    c="dodgerblue",
+    capsize=3,
+    yerr=sem_count,
+)
+ax.set_ylabel("Fraction of TR DNMs\n(mean +/- 95% CI)")
+ax.set_xlabel("TR DNM size (bp)")
+ax.set_xlim(-MAX_SIZE - 1, MAX_SIZE)
+sns.despine(ax=ax)
+f.tight_layout()
 f.savefig("sizes.png", dpi=200)
-
-
-
-#### PLOT MOTIF SIZE DISTRO ###
-
-# read in all per-sample DNM files
-denoms = []
-for fh in glob.glob(f"tr_validation/csv/rates/*.{ASSEMBLY}.denominator.tsv"):
-    df = pd.read_csv(fh, sep="\t", dtype={"sample_id": str, "motif_size": int})
-    denoms.append(df)
-denoms = pd.concat(denoms)
-denoms = denoms[denoms["sample_id"].isin(samples)]
-denoms = denoms.groupby(["sample_id", "motif_size"]).agg(denominator=("denominator", "sum"))
-
-f, ax = plt.subplots()
-sns.pointplot(data=denoms.query("motif_size > 0 and motif_size < 20"), x="motif_size", y="denominator", ax=ax)
-f.savefig("motif.denominator.png", dpi=200)
-
-# for i, (motif_class, motif_df) in enumerate(mutations.groupby("motif_size")):
-#     bottom = np.zeros(bins.shape[0])
-
-#     for sample, sample_df in motif_df.groupby("sample_id"):
-#         sizes = sample_df["likely_denovo_size"].values
-#         hist, edges = np.histogram(sizes, bins=bins)
-#         axarr[i].bar(bins[:-1], hist, 1, bottom=bottom[:-1], ec="w", lw=0.5, label=sample)
-#         bottom[:-1] += hist
-#     axarr[i].set_title(motif_class)
-#     axarr[i].set_ylabel("# of TR DNMs")
-#     if i == 0:
-#         axarr[i].legend(shadow=True, fancybox=True, title="Sample ID")
-#     if i == 2:
-#         axarr[i].set_xlabel("TR DNM size (bp)")
-#     sns.despine(ax=axarr[i])
-# # g = sns.FacetGrid(data=mutations, col="Motif type")
-# # g.map(sns.histplot, "Likely DNM size", bins=bins, hue="sample_id", lw=1, edgecolor="w", stat="proportion")
-# #ax.set_xlabel("Likely DNM size (bp)")
-# f.tight_layout()
-# f.savefig("sizes.png", dpi=200)
+f.savefig("sizes.svg")
