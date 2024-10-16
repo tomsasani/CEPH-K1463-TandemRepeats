@@ -2,10 +2,12 @@ import pandas as pd
 import glob
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 import seaborn as sns
 import scipy.stats as ss
 from FAILING_TRIDS import FAIL_VNTRS, FAIL_SVS
+
 
 def calculate_poisson_ci(ct: int, obs: int, alpha: float = 0.95):
 
@@ -24,16 +26,16 @@ def calculate_poisson_ci(ct: int, obs: int, alpha: float = 0.95):
     return (rate_lower, rate_upper)
 
 pd.set_option("display.precision", 8)
-plt.rc("font", size=12)
+plt.rc("font", size=16)
 
 # define some global variables we'll access for filtering
 FILTER_TRANSMITTED = False
 PER_HAPLOTYPE = True
 FILTER_RECURRENT = True
-PER_HAPLOTYPE = True
 FILTER_ELEMENT = True
 FILTER_SV = True
 FILTER_VNTR = True
+FILTER_COMPLEX = False
 
 # define the assembly we're sourcing our DNMs from
 ASSEMBLY = "GRCh38"
@@ -69,7 +71,6 @@ for fh in glob.glob(f"tr_validation/csv/rates/*.{ASSEMBLY}.denominator.tsv"):
     denoms.append(df)
 denoms = pd.concat(denoms)
 denoms = denoms[denoms["sample_id"].isin(sample_ids)]
-
 # if we want to calculate mutation rates per-haplotype, rather
 # than per-genome, we need to multiply the denominator by 2 to account
 # for there being 2 copies of every locus in a diploid genome.
@@ -111,12 +112,13 @@ if FILTER_SV:
 
 # if desired, filter VNTRs that failed manual inspection
 if FILTER_VNTR:
+    
     mutations = mutations[
         (
-            (mutations["motif_size"] >= 6)
+            (mutations["simple_motif_size"] == "VNTR")
             & (~mutations["trid"].isin(FAIL_VNTRS))
         )
-        | (mutations["motif_size"] < 6)
+        | (mutations["simple_motif_size"] != "VNTR")
     ]
 
 # if desired, remove untransmitted DNMs in the samples for whom we can assess that
@@ -130,11 +132,12 @@ if FILTER_TRANSMITTED:
         | (mutations["children_with_denovo_allele"] != "unknown")
     ]
 
+print (mutations.groupby("motif_size").size())
+
 mutations["phase"] = mutations["phase_summary"].apply(lambda p: p.split(":")[0] if p != "unknown" else p)
 
 # output filtered mutations to CSV
 mutations.to_csv(f"tr_validation/csv/mutations.{ASSEMBLY}.filtered.csv", index=False)
-
 
 # figure out the total number of BP affected by TRs
 print ("### Total BP affected by TRs")
@@ -206,8 +209,9 @@ def plot_mutation_rate_vs(
     mutations: pd.DataFrame,
     denoms: pd.DataFrame,
     colname: str = "motif_size",
-    plot_strs: bool = True,
-    outname: str = "out.png"
+    plot_strs: bool = False,
+    outname: str = "out.png",
+    include_labels: bool = True,
 ):
 
     # group by more straightforward motif size definition
@@ -216,14 +220,22 @@ def plot_mutation_rate_vs(
         .agg({"denominator": "sum"})
         .reset_index()
     )
-    per_col_mutation_counts = (
+    if FILTER_COMPLEX:
+        per_col_mutation_counts = (
+        mutations[mutations["simple_motif_size"] != "complex"].groupby(colname)
+        .size()
+        .reset_index()
+        .rename(columns={0: "numerator"})
+    )
+    else:
+        per_col_mutation_counts = (
         mutations.groupby(colname)
         .size()
         .reset_index()
         .rename(columns={0: "numerator"})
     )
-
     per_col_rates = per_col_mutation_counts.merge(per_col_denoms)
+
 
     if colname == "reflen_bin":
         per_col_rates["reflen_bin"] = per_col_rates["reflen_bin"].apply(lambda b: int(b.split(",")[0].lstrip("()")))
@@ -246,25 +258,41 @@ def plot_mutation_rate_vs(
     )
 
     # plot rates across samples
-    f, ax = plt.subplots(figsize=(11, 5))
-
+    if colname == "motif_size":
+        # f, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 5), sharey=True)
+        f = plt.figure(figsize=(16, 8))
+        gs = gridspec.GridSpec(1, 2, width_ratios=[1, 4], wspace=0.1)
+        ax2 = plt.subplot(gs[0, 0])
+        ax1 = plt.subplot(gs[0, 1], sharey=ax2)
+    else:
+        f, ax1 = plt.subplots(figsize=(11, 5))
     ycol = "rate"
 
     x, y = per_col_rates[colname], per_col_rates[ycol].values
     err = per_col_rates[["ci_lo", "ci_hi"]].values.T
+    ax1.fill_between(x, y1=err[0], y2=err[1], color="gainsboro", alpha=0.5, zorder=0)
+    ax1.plot(x, y, c="dodgerblue", zorder=1, lw=0.75)
+    ax1.scatter(x, y, c="dodgerblue", ec="w", lw=0.25, s=75)
 
-    ax.fill_between(x, y1=err[0], y2=err[1], color="gainsboro", alpha=0.5)
-    ax.scatter(x, y, c="dodgerblue", ec="w", lw=0.5)
-    ax.plot(x, y, c="dodgerblue")
+    # second axis for the denominator
+    ax_denom = ax1.twinx()
+    per_col_denoms = per_col_denoms[per_col_denoms[colname] <= per_col_rates[colname].max()]
+    denom_y = per_col_denoms["denominator"] // 8
+    if PER_HAPLOTYPE:
+        denom_y //= 2
+    ax_denom.plot(per_col_denoms[colname], denom_y, c="goldenrod", zorder=-1, lw=0.75)
+    ax_denom.scatter(per_col_denoms[colname], denom_y, c="goldenrod", ec="w", lw=0.25, s=75)
+    ax_denom.set_yscale("log")
 
     if plot_strs:
         ax_new = inset_axes(
-            ax,
+            ax1,
             1.75,
-            1.2,
+            1.25,
             loc="upper left",
-            bbox_to_anchor=(0.1, 0.8, .3, .3),
-            bbox_transform=ax.transAxes,
+            #bbox_to_anchor=(0.1, 0.9, .3, .3),
+            bbox_to_anchor=(0.3, 0.82, .3, .3),
+            bbox_transform=ax1.transAxes,
             axes_kwargs={"yscale": "log"},
         )
 
@@ -274,22 +302,74 @@ def plot_mutation_rate_vs(
         err = str_df[["ci_lo", "ci_hi"]].values.T
 
         ax_new.set_yscale("log")
-        ax_new.set_ylim(7e-8, 7e-5)
+        ax_new.set_ylim(7e-8, 9e-5)
 
         ax_new.fill_between(x, y1=err[0], y2=err[1], color="gainsboro", alpha=0.5)
         ax_new.scatter(x, y, c="dodgerblue", ec="w", lw=0.5)
         ax_new.plot(x, y, c="dodgerblue")
-        ax_new.set_title("STR DNMs", size=10)
 
-    ax.set_yscale("log")
-    ax.set_ylabel("Mutation rate\n(per locus, per haplotype\n per generation) +/- 95% CI")
+    # subplot for per-motif type rates
+    # group by more straightforward motif size definition
     if colname == "motif_size":
-        ax.set_xlabel("Minimum motif size in locus (bp)")
-    else:
-        ax.set_xlabel("Length of reference allele (bp)")
-    sns.despine(ax=ax)
-    # f.tight_layout()
-    f.savefig(outname)#, dpi=200)
+        per_col_denoms_simple = (
+            denoms.groupby("simple_motif_size")
+            .agg({"denominator": "sum"})
+            .reset_index()
+        )
+        per_col_mutation_counts_simple = (
+            mutations.groupby("simple_motif_size")
+            .size()
+            .reset_index()
+            .rename(columns={0: "numerator"})
+        )
+        per_col_rates_simple = per_col_mutation_counts_simple.merge(per_col_denoms_simple)
 
-plot_mutation_rate_vs(mutations, denoms, colname="motif_size", plot_strs=True, outname="motif_size.rates.pdf")
-plot_mutation_rate_vs(mutations, denoms, colname="reflen_bin", plot_strs=False, outname="reflen.rates.svg")
+        per_col_rates_simple["rate"] = per_col_rates_simple["numerator"] / per_col_rates_simple["denominator"]
+        per_col_rates_simple["ci_lo"] = per_col_rates_simple.apply(
+            lambda row: calculate_poisson_ci(row["numerator"], row["denominator"])[0],
+            axis=1,
+        )
+        per_col_rates_simple["ci_hi"] = per_col_rates_simple.apply(
+            lambda row: calculate_poisson_ci(row["numerator"], row["denominator"])[1],
+            axis=1,
+        )
+        x, y = [0.25, 1, 1.75], per_col_rates_simple[ycol].values
+        err = per_col_rates_simple[["ci_lo", "ci_hi"]].values.T
+        offset = np.zeros_like(err)
+        offset[0, :] = y - err[0]
+        offset[1, :] = err[1] - y
+        ax2.set_xticks([0.25, 1, 1.75])
+        ax2.set_xlim(0, 2)
+        ax2.errorbar(x, y, yerr=offset, c="dodgerblue", fmt="o", ms=10)
+        sns.despine(ax=ax2, left=False, right=True, top=True)
+
+    ax1.set_yscale("log")
+    sns.despine(ax=ax1)
+    sns.despine(ax=ax_denom, left=False, right=False, top=True)
+    ax1.set_xlim(0, per_col_rates[colname].max() + 1)
+    ax_denom.set_xlim(0, per_col_rates[colname].max() + 1)
+
+    if include_labels:
+        ax1.set_ylabel("Mutation rate\n(per locus, per haplotype\n per generation) +/- 95% CI", c="dodgerblue")
+        
+        ax2.set_xticklabels(per_col_rates_simple["simple_motif_size"].to_list())
+        ax_denom.set_ylabel("Total number of loci in reference genome", c="firebrick")
+
+        if colname == "motif_size":
+            ax1.set_xlabel("Minimum motif size in locus (bp)")
+        else:
+            ax1.set_xlabel("Length of reference allele (bp)")
+    else:
+        plt.setp(ax1.get_xticklabels(), visible=False)
+        plt.setp(ax2.get_xticklabels(), visible=False)
+
+    plt.setp(ax1.get_yticklabels(), visible=include_labels, c="dodgerblue")
+    plt.setp(ax_denom.get_yticklabels(), visible=include_labels, c="firebrick")
+
+    if colname == "motif_size":
+        plt.setp(ax2.get_yticklabels(), visible=include_labels, c="dodgerblue")
+
+    f.tight_layout()
+    f.savefig(outname, dpi=300 if outname.endswith('png') else None)
+
+plot_mutation_rate_vs(mutations, denoms, colname="motif_size", plot_strs=False, include_labels=False, outname="motif_size.rates.png")
