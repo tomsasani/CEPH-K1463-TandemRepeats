@@ -253,7 +253,7 @@ def main(args):
             non_denovo_al = allele_lengths[1 - denovo_idx]
 
        
-        ref_len = end - start
+        ref_len = end - start - 1
         # calculate expected diffs between alleles and the reference genome.
         exp_diff_denovo = denovo_al - ref_len
         exp_diff_non_denovo = non_denovo_al - ref_len
