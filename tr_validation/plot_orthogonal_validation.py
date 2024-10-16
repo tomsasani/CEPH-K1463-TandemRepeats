@@ -7,8 +7,7 @@ import glob
 
 ASSEMBLY = "CHM13v2"
 ORTHOGONAL_TECH = "hifi"
-MIN_SIZE = 50
-MIN_MOTIF_SIZE = 1
+MIN_SIZE = 1
 
 # read in all per-sample DNM files
 mutations = []
@@ -22,7 +21,7 @@ mutations = mutations[mutations["paternal_id"] == 2209]
 
 # FILTERING
 mutations = mutations[np.abs(mutations["likely_denovo_size"]) >= MIN_SIZE]
-mutations = mutations[mutations["motif_size"] >= MIN_MOTIF_SIZE]
+mutations = mutations[mutations["simple_motif_size"] == "VNTR"]
 
 mutations = mutations[mutations["validation_status"] != "no_data"]
 

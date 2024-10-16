@@ -101,6 +101,15 @@ def determine_motif_size(row: pd.Series):
     """returns index of the motif in a complex locus that is mutated"""
     
     min_motif_len = row["min_motiflen"]
+    # if min_motif_len <= 6: return min_motif_len
+    # else:
+    #     if 6 <= min_motif_len <= 10:
+    #         return 7
+    #     else:
+    #         binsize = 10
+    #         bins = np.arange(10, 10_000, binsize)
+    #         i = np.digitize(min_motif_len, bins)
+    #         return i * binsize
 
     return min_motif_len
 

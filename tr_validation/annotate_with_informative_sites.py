@@ -92,15 +92,6 @@ def catalog_informative_sites(
     res = []
     for v in vcf(region):
         
-        # make sure variant passes basic filters
-        # if not var_pass(
-        #     v,
-        #     np.array([dad_idx, mom_idx, kid_idx]),
-        #     min_depth=10,
-        #     min_gq=20,
-        # ):
-        #     continue
-
         # access unphased genotypes in kid, mom, and dad
         gts = v.gt_types
         dad_gt, mom_gt, kid_gt = (
@@ -108,8 +99,6 @@ def catalog_informative_sites(
             gts[mom_idx],
             gts[kid_idx],
         )
-
-        ad, rd = v.gt_alt_depths, v.gt_ref_depths
 
         # make sure parents don't have the same genotype.
         if dad_gt == mom_gt: continue
@@ -242,6 +231,9 @@ def main(args):
     KID_STR_VCF = VCF(args.str_vcf, gts012=True)
     SNP_VCF = VCF(args.joint_snp_vcf, gts012=True)
 
+    KID_STR_SMP2IDX = dict(zip(KID_STR_VCF.samples, range(len(KID_STR_VCF.samples))))
+    kid_str_idx = KID_STR_SMP2IDX[args.focal_alt]
+
     SLOP = 500_000
 
     SMP2IDX = dict(zip(SNP_VCF.samples, range(len(SNP_VCF.samples))))
@@ -265,7 +257,6 @@ def main(args):
 
         is_male_x = row_dict["suffix"].startswith("S") and trid_chrom == "chrX"
         is_male_y = row_dict["suffix"].startswith("S") and trid_chrom == "chrY"
-
 
         denovo_al = row_dict["denovo_al"]
 
@@ -303,10 +294,10 @@ def main(args):
 
         # loop over the STR VCF to get the focal STR entry
         for var in KID_STR_VCF(f"{trid_chrom}:{trid_start}-{trid_end}"):
+
             # ensure the VCF TRID matches the TR TRID
             if var.INFO.get("TRID") != trid: 
                 continue
-
             # get phased genotype if we're not on a male X
             is_phased = False
             try:
@@ -320,9 +311,6 @@ def main(args):
             else:
                 if not is_phased: 
                     continue
-
-            # concatenate the alleles at this locus
-            alleles = [var.REF] + var.ALT
 
             if hap_a == denovo_gt:
                 denovo_hap_id = "A"
@@ -339,8 +327,7 @@ def main(args):
                 pass
             else:
                 ps_tags = var.format("PS")[:, 0]
-                assert ps_tags.shape[0] == 1
-                kid_ps = ps_tags[0]
+                kid_ps = ps_tags[kid_str_idx]
 
             row_dict = row.to_dict()
             row_dict.update(
@@ -358,7 +345,7 @@ def main(args):
             dnm_phases.append(row_dict)
 
     informative_sites = pd.concat(informative_sites).drop_duplicates()
-
+    
     dnm_phases = pd.DataFrame(dnm_phases)
 
     # merge de novo STR information with informative site information.

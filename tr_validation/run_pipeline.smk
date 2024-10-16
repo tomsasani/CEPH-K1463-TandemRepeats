@@ -314,6 +314,7 @@ rule merge_with_orthogonal_evidence:
 rule calculate_grouped_denominator:
     input:
         py_script = "tr_validation/calculate_grouped_denominator.py",
+        utils = "tr_validation/utils.py",
         polymorphic_trids = POLYMORPHIC_TRIDS,
     output: "tr_validation/csv/rates/{SAMPLE}.{ASSEMBLY}.denominator.tsv"
     params:
@@ -383,8 +384,8 @@ rule combine_trio_vcfs:
 
 
 rule index_trio_vcf:
-    input: "tr_validation/data/vcf/{SAMPLE}.trio.vcf.gz"
-    output: "tr_validation/data/vcf/{SAMPLE}.trio.vcf.gz.csi"
+    input: "tr_validation/data/vcf/{SAMPLE}.{ASSEMBLY}.trio.vcf.gz"
+    output: "tr_validation/data/vcf/{SAMPLE}.{ASSEMBLY}.trio.vcf.gz.csi"
 
     shell:
         """
