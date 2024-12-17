@@ -5,9 +5,7 @@ import tqdm
 from typing import List, Dict
 from collections import Counter
 import numpy as np
-import matplotlib.pyplot as plt
 import argparse
-from utils import filter_mutation_dataframe
 
 def trid_to_region(trid: str):
     chrom, start, end, _ = trid.split("_")
@@ -25,10 +23,13 @@ def variant_pass(v: cyvcf2.Variant, idxs: np.ndarray, min_gq: int = 20, min_dp: 
         return False
     return True
 
-def ab_ok(idx: int, rd: np.ndarray, ad: np.ndarray):
+def ab_ok(idx: int, rd: np.ndarray, ad: np.ndarray, gt: int):
     ab = ad[idx] / (rd[idx] + ad[idx])
-    return 0.3 <= ab <= 0.7
-
+    if gt == 1:
+        return 0.3 <= ab <= 0.7
+    elif gt == 2:
+        return ab >= 0.9
+    else: return False
 
 def catalog_informative_sites(
     *,
@@ -59,17 +60,25 @@ def catalog_informative_sites(
         gts = v.gt_types
         rd, ad = v.gt_ref_depths, v.gt_alt_depths
 
-        # figure out informative parent
+        # figure out informative parent. as long as parental genotypes
+        # don't match AND the kid is HET, we have an informative site.
+        # we know for a fact that if the kid is HET, the parent with more ALTs
+        # donated the ALT allele (e.g., if kid is 0/1, dad is 1/1, and mom is 0/1,
+        # dad donated the 1 and mom donated the 0).
         inf_parent = None
-        if gts[mom_idx] == 0 and gts[dad_idx] == 1 and ab_ok(dad_idx, rd, ad):
+        dad_gt, mom_gt = gts[dad_idx], gts[mom_idx]
+        if dad_gt > mom_gt and ab_ok(dad_idx, rd, ad, dad_gt):
             inf_parent = "dad"
-        elif gts[mom_idx] == 1 and gts[dad_idx] == 0 and ab_ok(mom_idx, rd, ad):
+        elif mom_gt > dad_gt and ab_ok(mom_idx, rd, ad, mom_gt):
             inf_parent = "mom"
         if inf_parent is None: continue
 
         # make sure kid is HET
-        if not (gts[focal_idx] == 1 and ab_ok(focal_idx, rd, ad)): continue
-        # make sure spouse is HOM_REF
+        if not (gts[focal_idx] == 1 and ab_ok(focal_idx, rd, ad, gts[focal_idx])): continue
+        
+        # make sure this site is informative w/r/t spouse, as well.
+        # kid and spouse must have different genotypes -- in this code, 
+        # we require that kid is HET and spouse in HOM_REF.
         if gts[spouse_idx] != 0: continue
 
         # loop over kids, figure out who has informative allele
@@ -77,10 +86,10 @@ def catalog_informative_sites(
         for k in kids:
             ki = smp2idx[k]
             # if the kid that inherited the informative site also has the STR, 
-            # make a note. if more kids inherit the informative allele than inherit the DNM,
+            # make a note. if some kids inherit the informative allele but don't inherit the DNM,
             # we may be looking at a post-zygotic.
             has_str = "Y" if k in kids_with_str else "N"
-            if gts[ki] == 1 and ab_ok(ki, rd, ad):
+            if gts[ki] == 1 and ab_ok(ki, rd, ad, gts[ki]):
                 inf_string.append(f"{k}-{has_str}")
         if len(inf_string) == 0: continue
         res.append(f"{v.CHROM}:{v.POS}:{inf_parent}:{'|'.join(inf_string)}")
@@ -121,7 +130,7 @@ def main(args):
     # define the amount of slop (in bp) around a de novo to look for informative sites
     SLOP = 250_000
 
-    INH_COL = "children_with_denovo_allele"
+    INH_COL = "children_with_denovo_allele_strict"
 
     transmission = pd.read_csv(
         args.transmission,
@@ -130,18 +139,20 @@ def main(args):
             "sample_id": str,
             INH_COL: str,
         },
-    ).dropna(subset=[INH_COL])
+    ).dropna(subset=[INH_COL, "children_consistent"])
 
     # filter to the samples of interest
     transmission = transmission[transmission["sample_id"] == args.focal]
 
+    # we'll only look at sites at which *no G4 samples had an additional DNM at this locus*. in other
+    # words, every G4 sample has to be mendelian consistent with the G3 parents.
+    # transmission = transmission[(transmission["n_children"] == transmission["n_children_consistent"])]
+
     mutations = pd.read_csv(args.mutations, sep="\t", dtype={"sample_id": str})
 
-    mutations = mutations.merge(transmission)#, on=["trid", "index", "denovo_coverage"])
+    mutations = mutations.merge(transmission)
 
-    # remove pathogenics
     mutations["region"] = mutations["trid"].apply(lambda t: trid_to_region(t))
-    mutations["chrom"] = mutations["region"].apply(lambda r: r.split(":")[0])
     mutations = mutations[mutations["region"] != "UNK"]
 
     mutations["n_with_denovo_allele"] = mutations[INH_COL].apply(lambda c: len(c.split(",")))
@@ -149,7 +160,7 @@ def main(args):
 
     # loop over mutations in the dataframe
     res = []
-    for chrom, chrom_df in mutations.groupby("chrom"):
+    for chrom, chrom_df in mutations.groupby("#chrom"):
 
         for _, row in tqdm.tqdm(chrom_df.iterrows(), total=chrom_df.shape[0]):
             # extract informative sites from the parents
@@ -162,6 +173,14 @@ def main(args):
 
             slop_region = f"{chrom}:{adj_start}-{adj_end}"
 
+            # get the list of kids that inherited the STR from the focal individual.
+            kids_with_str = [SMP2ALT[k] for k in row[INH_COL].split(",")]
+            # get the list of kids that are mendelian consistent with the focal individual.
+            kids_mendel_consist = [SMP2ALT[k] for k in row["children_consistent"].split(",")]
+            # subset to kids that both inherited the STR AND are mendelian consistent (i.e., 
+            # don't have evidence of an additional DNM at this locus)
+            kids_with_str_consist = list(set(kids_with_str).intersection(set(kids_mendel_consist)))
+        
             phase_info = catalog_informative_sites(
                 vcf=SNP_VCF,
                 region=slop_region,
@@ -170,7 +189,7 @@ def main(args):
                 focal=SMP2ALT[args.focal],
                 focal_spouse=SPOUSE,
                 kids=CHILDREN,
-                kids_with_str=[SMP2ALT[k] for k in row[INH_COL].split(",")],
+                kids_with_str=kids_with_str_consist,
                 smp2idx=SMP2IDX,
                 min_gq=20,
                 min_dp=10,
@@ -188,13 +207,20 @@ def main(args):
                 if len(relevant_phase_infos) == 0:
                     most_common_hap, most_common_freq, is_pz = "UNK", 0., False
                 else:
+                    # keep track of the "inheritance combos" -- that is, the number of instances where
+                    # a particular informative allele (known to come from dad or mom) was inherited by 
+                    # a list of children in the family.
                     inheritance_combos = Counter([":".join(p.split(":")[2:]) for p in relevant_phase_infos]).most_common()
                     total_combos = len(relevant_phase_infos)
 
                     most_common_hap = inheritance_combos[0][0]
                     most_common_freq = inheritance_combos[0][1] / total_combos
-                    most_common_children = [c.split("-")[-1] for c in most_common_hap.split(":")[-1].split("|")]
-                    is_pz = len(set(most_common_children)) == 2
+                    # most common hap is formatted like
+                    # dad:NA12886-Y|NA12887-Y|NA12882-N|NA12879-Y|NA12883-Y
+                    # keep track of whether all of the children that inherited the informative
+                    # allele at this site also inherited the DNM
+                    children_inherited_both = [c.split("-")[-1] for c in most_common_hap.split(":")[-1].split("|")]
+                    is_pz = len(set(children_inherited_both)) == 2
 
             row_dict["most_common_hap"] = most_common_hap
             row_dict["most_common_freq"] = most_common_freq
@@ -206,21 +232,13 @@ def main(args):
     res_df = pd.DataFrame(res)
 
     res_df["phase"] = res_df["most_common_hap"].apply(lambda c: c.split(":")[0] if c != "UNK" and len(c.split(":")[1]) > 0 else "unknown")
-    res_df["consistent"] = res_df["most_common_freq"] >= 0.8
-    #res_df["true_phase"] = res_df.apply(lambda row: row["true_phase"] if row["consistent"] else "UNK", axis=1)
-    # res_df.drop(
-    #     columns=[
-    #         INH_COL,
-    #         "region",
-    #         "n_with_denovo_allele",
-    #     ]
-    # )res_df.to_csv(args.out, sep="\t", index=False)
+    
     res_df.to_csv(args.out, sep="\t", index=False)
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--mutations")
-    p.add_argument("-transmission")
+    p.add_argument("--transmission")
     p.add_argument("--ped")
     p.add_argument("--focal")
     p.add_argument("--dad_id")
