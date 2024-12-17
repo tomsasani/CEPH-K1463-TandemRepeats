@@ -105,6 +105,17 @@ def check_for_dnm_inheritance(inf: str):
     # the DNM allele
     return all([h == "N" for h in has_dnm])
 
+def find_consistent_kids_with_str(row: pd.Series, inh_col: str, smp2alt: Dict[str, str]):
+
+    kids_with_str = [smp2alt[k] for k in row[inh_col].split(",")]
+    # get the list of kids that are mendelian consistent with the focal individual.
+    kids_mendel_consist = [smp2alt[k] for k in row["children_consistent"].split(",")]
+    # subset to kids that both inherited the STR AND are mendelian consistent (i.e., 
+    # don't have evidence of an additional DNM at this locus)
+    kids_with_str_consist = list(set(kids_with_str).intersection(set(kids_mendel_consist)))
+
+    return ",".join(kids_with_str_consist)
+
 
 def main(args):
     # assume we have a VCF with SNP genotypes for all individuals in the pedigree
@@ -156,7 +167,11 @@ def main(args):
     mutations = mutations[mutations["region"] != "UNK"]
 
     mutations["n_with_denovo_allele"] = mutations[INH_COL].apply(lambda c: len(c.split(",")))
+
+    # need at least one kid with the de novo
     mutations = mutations[mutations["n_with_denovo_allele"] >= 1]
+    # need at least two kids that are mendelian consistent
+    mutations = mutations[mutations["n_children_consistent"] > 1]
 
     # loop over mutations in the dataframe
     res = []
@@ -177,10 +192,11 @@ def main(args):
             kids_with_str = [SMP2ALT[k] for k in row[INH_COL].split(",")]
             # get the list of kids that are mendelian consistent with the focal individual.
             kids_mendel_consist = [SMP2ALT[k] for k in row["children_consistent"].split(",")]
-            # subset to kids that both inherited the STR AND are mendelian consistent (i.e., 
-            # don't have evidence of an additional DNM at this locus)
-            kids_with_str_consist = list(set(kids_with_str).intersection(set(kids_mendel_consist)))
-        
+
+            # TODO: ensure that all of the kids with the STR *have* are also mendelian consistent
+            # if not all([k in kids_mendel_consist for k in kids_with_str]):
+            #     most_common_hap, most_common_freq, is_pz = "UNK", 0., False
+            
             phase_info = catalog_informative_sites(
                 vcf=SNP_VCF,
                 region=slop_region,
@@ -188,8 +204,8 @@ def main(args):
                 dad=args.dad_id,
                 focal=SMP2ALT[args.focal],
                 focal_spouse=SPOUSE,
-                kids=CHILDREN,
-                kids_with_str=kids_with_str_consist,
+                kids=kids_mendel_consist,
+                kids_with_str=kids_with_str,
                 smp2idx=SMP2IDX,
                 min_gq=20,
                 min_dp=10,
@@ -208,7 +224,7 @@ def main(args):
                     most_common_hap, most_common_freq, is_pz = "UNK", 0., False
                 else:
                     # keep track of the "inheritance combos" -- that is, the number of instances where
-                    # a particular informative allele (known to come from dad or mom) was inherited by 
+                    # a particular informative allele (known to come from dad or mom) was inherited by
                     # a list of children in the family.
                     inheritance_combos = Counter([":".join(p.split(":")[2:]) for p in relevant_phase_infos]).most_common()
                     total_combos = len(relevant_phase_infos)
@@ -232,7 +248,7 @@ def main(args):
     res_df = pd.DataFrame(res)
 
     res_df["phase"] = res_df["most_common_hap"].apply(lambda c: c.split(":")[0] if c != "UNK" and len(c.split(":")[1]) > 0 else "unknown")
-    
+
     res_df.to_csv(args.out, sep="\t", index=False)
 
 if __name__ == "__main__":
