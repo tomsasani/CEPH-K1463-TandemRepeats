@@ -402,7 +402,7 @@ def main(args):
         informative_sites,
         left_on=["trid", "str_chrom", "kid_str_ps"],
         right_on=["trid", "inf_chrom", "kid_inf_ps"],
-        how="left",
+        # how="left",
     )
 
     # measure the consistency of the haplotype phasing. subset the dataframe to only
