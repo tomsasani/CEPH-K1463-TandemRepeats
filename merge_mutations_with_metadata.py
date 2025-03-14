@@ -1,8 +1,8 @@
 import pandas as pd
 import argparse
 import numpy as np
-import glob
-
+import matplotlib.pyplot as plt
+import seaborn as sns
 from FAILING_TRIDS import FAIL_VNTRS, FAIL_SVS
 
 import utils
@@ -27,12 +27,15 @@ def main(args):
         sep="\t",
         dtype={"sample_id": str},
     )
-    
+
     raw_plus_transmission = raw_denovos.merge(transmission_evidence)
 
     mutations = raw_plus_transmission.merge(phasing, how="left").fillna({"phase_summary": "unknown"})
-    mutations["likely_denovo_size"] = mutations.apply(lambda row: utils.add_likely_de_novo_size(row, use_phase=True), axis=1)
+    mutations["likely_denovo_size_parsimony"] = mutations.apply(lambda row: utils.add_likely_de_novo_size(row, use_parsimony=True), axis=1)
+    mutations["likely_denovo_size"] = mutations.apply(lambda row: utils.add_likely_de_novo_size(row, use_parsimony=False), axis=1)
 
+
+    
 
     # if we 're not at a homopolymer, ensure that the likely de novo size is at least 2 bp
     mutations = mutations[

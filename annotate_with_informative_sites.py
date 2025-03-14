@@ -110,14 +110,20 @@ def find_informative_sites_in_parents(
             if kid_gt != 1: continue
 
         # create namedtuple object with information about this site
-        InfSite = namedtuple("InfSite", "chrom pos dad_gt mom_gt kid_gt is_male_x is_male_y")
-        inf_site = InfSite(v.CHROM, v.POS, dad_gt, mom_gt, kid_gt, is_male_x, is_male_y)
+        InfSite = namedtuple("InfSite", "chrom pos dad_gt mom_gt is_male_x is_male_y")
+        inf_site = InfSite(v.CHROM, v.POS, dad_gt, mom_gt, is_male_x, is_male_y)
 
         res.append(inf_site)
 
     return res
 
-def find_phased_informative_sites(
+def adjudicate_str_and_snv():
+    """given a phased STR genotype and a phased SNV genotype that are present
+    in the same HiPhase phase block, 
+    """
+    pass
+
+def phase_informative_sites(
     *,
     inf_sites: List[namedtuple],
     vcf: cyvcf2.VCF,
@@ -136,15 +142,16 @@ def find_phased_informative_sites(
     """
 
     kid_idx = smp2idx[child]
-
     res = []
 
+    # loop over the list of informative sites surrounding the TR DNM
     for site in inf_sites:
         
         chrom, start, end = site.chrom, site.pos - 1, site.pos
         is_male_x, is_male_y = site.is_male_x, site.is_male_y
 
-        dad_gt, mom_gt, kid_gt = site.dad_gt, site.mom_gt, site.kid_gt
+        # we require the kid to be HET, so we don't need to access their genotype
+        dad_gt, mom_gt = site.dad_gt, site.mom_gt
 
         region = f"{chrom}:{start}-{end}"
         for v in vcf(region):
@@ -160,19 +167,13 @@ def find_phased_informative_sites(
                 # only need a PS tag if we're not on a male X
                 if ps_tags is None: continue
                 ps_tags = ps_tags[:, 0]
-
                 assert ps_tags.shape[0] == len(smp2idx)
-
                 # get kid's PS tag
                 kid_ps = ps_tags[kid_idx]
 
-            # get phased genotype information. a bit redundant,
-            # since we already grabbed unphased genotypes, but
-            # necessary to figure out which haplotype the
-            # alleles are on in the child.
+            # get phased genotype information in the child.
             phased_genotypes = v.genotypes
             kid_hap_0, kid_hap_1, kid_phased = phased_genotypes[kid_idx]
-
             # only need kid to be phased if we're *not* on a male sex chromosome.
             if is_male_x or is_male_y:
                 pass
@@ -182,26 +183,23 @@ def find_phased_informative_sites(
             # if the kid is het, whichever parent has more
             # alt alleles is the one that donated the ALT.
             # even if one parent is UNK, we can assume they donated
-            # the REF allele. if we're on a male X, we know that
-            # the kid got their X from mom.
+            # the REF allele if we're on an autosome.
             hap_0_origin, hap_1_origin = None, None
-
+            # determining origin is easy if we're on a male X or Y
             if is_male_x:
                 hap_0_origin, hap_1_origin = "mom", "mom"
             elif is_male_y:
                 hap_0_origin, hap_1_origin = "dad", "dad"
             else:
-                # if dad is HOM_ALT, it doesn't matter what mom is.
-                if (dad_gt == 2 and mom_gt in (0, 1, 3)) or (dad_gt == 1 and mom_gt == 0):
+                if dad_gt > mom_gt:
                     hap_0_origin = "dad" if kid_hap_0 == 1 else "mom"
                     hap_1_origin = "dad" if kid_hap_1 == 1 else "mom"
-                elif (mom_gt == 2 and dad_gt in (0, 1, 3)) or (mom_gt == 1 and dad_gt == 0):
+                elif mom_gt > dad_gt:
                     hap_0_origin = "mom" if kid_hap_0 == 1 else "dad"
                     hap_1_origin = "mom" if kid_hap_1 == 1 else "dad"
-                # otherwise, one parent is HET and the other is unknown, so we can't tell.
                 else:
                     continue
-
+            # store results in dictionary
             out_dict = {
                 "inf_chrom": v.CHROM,
                 "inf_pos": v.POS,
@@ -249,11 +247,12 @@ def measure_consistency(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
         # then all of them are consistent
         if sorted_values.shape[0] > 1 and inconsistent_phases.shape[0] == 0:
             trid_df_sorted_consistent = trid_df_sorted.iloc[:]
-        # if we have more than 1 informative site and 
+        # if we have more than 1 informative site and some of them are inconsistent,
+        # return the consistent ones up until the first inconsistency.
         elif sorted_values.shape[0] > 1 and inconsistent_phases.shape[0] > 0:
             trid_df_sorted_consistent = trid_df_sorted.iloc[:inconsistent_phases[0]]
         # if we only have one informative site
-        elif sorted_values.shape[0] == 1 and sorted_values[0] in ("mom", "dad"):
+        elif sorted_values.shape[0] == 1:# and sorted_values[0] in ("mom", "dad"):
             trid_df_sorted_consistent = trid_df_sorted.iloc[:]
         # if we don't have any informative sites
         else:
@@ -272,7 +271,7 @@ def main(args):
     KID_STR_SMP2IDX = dict(zip(KID_STR_VCF.samples, range(len(KID_STR_VCF.samples))))
     kid_str_idx = KID_STR_SMP2IDX[args.focal_alt]
 
-    SLOP = 500_000
+    SLOP = 50_000
 
     # CHROMS = [f"chr{c}" for c in range(1, 23)]
     # CHROMS.extend(["chrX", "chrY"])
@@ -294,18 +293,16 @@ def main(args):
         is_male_x = row_dict["suffix"].startswith("S") and trid_chrom == "chrX"
         is_male_y = row_dict["suffix"].startswith("S") and trid_chrom == "chrY"
 
-        denovo_al = row_dict["denovo_al"]
-
-        # # make sure we're looking at an autosome for now
-        # if trid_chrom not in CHROMS:
-        #     continue
+        als = list(map(int, row_dict["child_AL"].split(",")))
+        idx = row_dict["index"]
+        denovo_al = als[idx]
 
         phase_start, phase_end = trid_start - SLOP, trid_end + SLOP
         if phase_start < 1: phase_start = 1
 
-        # collate informative sites within a defined region surrounding the
-        # STR. we record the PS (phase block) tag in the mom, dad, and child
-        # at every informative site.
+        # collate informative SNV sites within a defined region surrounding the
+        # STR. this is just a list of every site where the parent genotypes are
+        # different, and the child is heterozygous.
         informative_parent_sites = find_informative_sites_in_parents(
                 vcf=JOINT_SNP_VCF,
                 region=f"{trid_chrom}:{phase_start}-{phase_end}",
@@ -321,9 +318,10 @@ def main(args):
             continue
 
         # using those informative sites, we can now search the kid's *phased*
-        # SNP VCF to cross-reference informative sites with phase blocks that are
-        # shared with the phased TR allele
-        informative_phases = find_phased_informative_sites(
+        # SNV VCF to determine which of the kid's haplotypes (A or B) carries the informative
+        # allele. that is, if mom is 0/1 and dad is 1/1, and the kid is 0|1, we know that
+        # haplotype A is from mom and B is from dad.
+        informative_phases = phase_informative_sites(
             inf_sites=informative_parent_sites,
             vcf=KID_SNP_VCF,
             smp2idx=dict(zip(KID_SNP_VCF.samples, range(len(KID_SNP_VCF.samples)))),
@@ -336,37 +334,29 @@ def main(args):
 
         informative_sites.append(informative_phases)
 
-        denovo_gt = row["genotype"]
-
-        # loop over the STR VCF to get the focal STR entry
+        # now, we look in the kid's phased STR VCF to figure out which
+        # haplotype the STR DNM occurred on
         for var in KID_STR_VCF(f"{trid_chrom}:{trid_start}-{trid_end}"):
-
             # ensure the VCF TRID matches the TR TRID
             if var.INFO.get("TRID") != trid: 
                 continue
-            # get phased genotype if we're not on a male X
-            is_phased = False
-            try:
-                hap_a, hap_b, is_phased = var.genotypes[0]
-            except ValueError: 
-                hap_a, is_phased = var.genotypes[0]
-                hap_b = 1 * hap_a
-
+            # get phased genotype if we're not on a male sex chromosome
             if is_male_x or is_male_y:
                 pass
             else:
-                if not is_phased: 
-                    continue
+                hap_a, hap_b, is_phased = var.genotypes[0]
+                if not is_phased: continue
 
-            if hap_a == denovo_gt:
+            allele_lengths = [len(var.REF)] + [len(a) for a in var.ALT]
+            assert denovo_al == allele_lengths[row["genotype"]]
+            
+            # figure out the haplotype on which the de novo allele occurred
+            if hap_a == row["genotype"]:
                 denovo_hap_id = "A"
-            elif hap_b == denovo_gt:
+            elif hap_b == row["genotype"]:
                 denovo_hap_id = "B"
             else:
                 continue
-
-            denovo_al_diff = denovo_al - len(var.REF)
-
             # access PS tag for child at the STR locus
             kid_ps = -1
             if is_male_x or is_male_y:
@@ -380,8 +370,6 @@ def main(args):
                 {
                     "denovo_hap_id": denovo_hap_id,
                     "str_chrom": trid_chrom,
-                    "denovo_al": denovo_al,
-                    "denovo_al_diff": denovo_al_diff,
                     "kid_str_ps": kid_ps,
                     "kid_str_gt": "|".join((str(hap_a), str(hap_b))),
                     "kid_str_hap_a": hap_a,
@@ -390,7 +378,7 @@ def main(args):
             )
             dnm_phases.append(row_dict)
 
-    informative_sites = pd.concat(informative_sites).drop_duplicates()
+    informative_sites = pd.concat(informative_sites)
 
     dnm_phases = pd.DataFrame(dnm_phases)
 
@@ -402,7 +390,6 @@ def main(args):
         informative_sites,
         left_on=["trid", "str_chrom", "kid_str_ps"],
         right_on=["trid", "inf_chrom", "kid_inf_ps"],
-        # how="left",
     )
 
     # measure the consistency of the haplotype phasing. subset the dataframe to only
@@ -413,17 +400,19 @@ def main(args):
     merged_dnms_inf["diff_to_str"] = merged_dnms_inf["inf_pos"] - merged_dnms_inf["str_midpoint"]
     merged_dnms_inf["abs_diff_to_str"] = np.abs(merged_dnms_inf["diff_to_str"])
 
-    merged_dnms_inf_consistent = measure_consistency(merged_dnms_inf, "haplotype_A_origin")
+    merged_dnms_inf["str_parent_of_origin"] = merged_dnms_inf.apply(
+        lambda row: row["haplotype_{}_origin".format(row["denovo_hap_id"])],
+        axis=1,
+    )
+
+    merged_dnms_inf_consistent = measure_consistency(merged_dnms_inf, "str_parent_of_origin")
 
     # now that we have a consistent set of informative sites surrounding the STR,
     # infer parent of origin for the haplotype that carries the de novo allele.
     # by figuring out the haplotype ID on which the de novo STR occurred (A or B)
     # and then asking which parent consistently donated the A or B haplotype at
     # the surrounding informative sites.
-    merged_dnms_inf_consistent["str_parent_of_origin"] = merged_dnms_inf_consistent.apply(
-        lambda row: row["haplotype_{}_origin".format(row["denovo_hap_id"])],
-        axis=1,
-    )
+    
 
     merged_dnms_inf_consistent.to_csv(args.out, index=False, sep="\t")
 
