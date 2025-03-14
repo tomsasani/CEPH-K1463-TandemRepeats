@@ -1,0 +1,15 @@
+*.tsv
+*.csv
+*.txt
+*.bam
+*.bai
+*.gz
+*.csi
+*.tbi
+*.bcf
+*.bed
+*.fa
+*.png
+.snakemake/
+snvs/
+__pycache__/
