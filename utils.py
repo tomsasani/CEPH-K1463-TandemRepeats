@@ -38,17 +38,13 @@ def al_in_parents(row: pd.Series):
         else: return False
 
 
-def add_likely_de_novo_size(row: pd.Series, use_phase: bool = True):
+def add_likely_de_novo_size(row: pd.Series, use_parsimony: bool = False):
 
     child_als = list(map(int, row["child_AL"].split(",")))
+
     # denovo idx
     denovo_idx = int(row["index"])
     denovo_al = child_als[denovo_idx]
-    non_denovo_al = None
-
-    if not row["trid"].startswith("chrX"):
-        non_denovo_idx = 1 - denovo_idx
-        non_denovo_al = child_als[non_denovo_idx]
 
     # figure out the inferred phase of the site, if not unknown
     phase = "unknown"
@@ -57,36 +53,8 @@ def add_likely_de_novo_size(row: pd.Series, use_phase: bool = True):
 
     # if phase is unknown, we *could* just use the minimum difference between the
     # de novo AL and any of the four parental ALs, assuming that the smallest
-    # difference is the most parsimonious expansion/contraction. however, this is too
-    # naive. for example, if the kid's non-denovo AL perfectly matches one of the two parents,
-    # then we can assume inheritance of that allele from taht parent. we can call this "fuzzy"
-    # phasing.
-
-    # what if the kid perfectly inherited an AL form one parent?
-    if use_phase:
-        if phase == "unknown":
-            parent_als = []
-            for parent in ("father", "mother"):
-                parent_als.extend(list(map(int, row[f"{parent}_AL"].split(","))))
-
-            abs_denovo_diffs = np.array([abs(denovo_al - al) for al in parent_als])
-            denovo_diffs = np.array([denovo_al - al for al in parent_als])
-            min_diff_idx = np.argmin(abs_denovo_diffs)
-            # likely original AL
-            return denovo_diffs[min_diff_idx]
-        else:
-            if phase == "dad":
-                parent_als = list(map(int, row["father_AL"].split(",")))
-            elif phase == "mom":
-                parent_als = list(map(int, row["mother_AL"].split(",")))
-
-            abs_denovo_diffs = np.array([abs(denovo_al - al) for al in parent_als])
-            denovo_diffs = np.array([denovo_al - al for al in parent_als])
-            min_diff_idx = np.argmin(abs_denovo_diffs)
-
-            # likely original AL
-            return denovo_diffs[min_diff_idx]
-    else:
+    # difference is the most parsimonious expansion/contraction. 
+    if use_parsimony:
         parent_als = []
         for parent in ("father", "mother"):
             parent_als.extend(list(map(int, row[f"{parent}_AL"].split(","))))
@@ -96,6 +64,35 @@ def add_likely_de_novo_size(row: pd.Series, use_phase: bool = True):
         min_diff_idx = np.argmin(abs_denovo_diffs)
         # likely original AL
         return denovo_diffs[min_diff_idx]
+    # however, the parsimony approach is a little naive. if we have information 
+    # about the parent-of-origin (and the haplotype-of-origin), we can do much better
+    else:
+        parent_al = row["allele_length_in_parent"]
+        if not np.isnan(parent_al):
+            return denovo_al - parent_al
+        else:
+            if phase == "unknown":
+                parent_als = []
+                for parent in ("father", "mother"):
+                    parent_als.extend(list(map(int, row[f"{parent}_AL"].split(","))))
+
+                abs_denovo_diffs = np.array([abs(denovo_al - al) for al in parent_als])
+                denovo_diffs = np.array([denovo_al - al for al in parent_als])
+                min_diff_idx = np.argmin(abs_denovo_diffs)
+                # likely original AL
+                return denovo_diffs[min_diff_idx]
+            else:
+                if phase == "dad":
+                    parent_als = list(map(int, row["father_AL"].split(",")))
+                elif phase == "mom":
+                    parent_als = list(map(int, row["mother_AL"].split(",")))
+
+                abs_denovo_diffs = np.array([abs(denovo_al - al) for al in parent_als])
+                denovo_diffs = np.array([denovo_al - al for al in parent_als])
+                min_diff_idx = np.argmin(abs_denovo_diffs)
+
+                # likely original AL
+                return denovo_diffs[min_diff_idx]
     
 def determine_motif_size(row: pd.Series):
     """returns index of the motif in a complex locus that is mutated"""
