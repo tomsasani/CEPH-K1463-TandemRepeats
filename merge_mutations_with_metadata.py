@@ -7,35 +7,54 @@ from FAILING_TRIDS import FAIL_VNTRS, FAIL_SVS
 
 import utils
 
+from schema import TRGTDeNovoSchema, TransmissionSchema, PhasedSchema
+
 
 def main(args):
-    raw_denovos = pd.read_csv(
+
+    DTYPES = {
+        "sample_id": str,
+        "children_with_denovo_allele": str,
+        "children_with_denovo_allele_strict": str,
+    }
+
+    # read in the (lightly) prefiltered de novo dataframe.
+    filtered_denovos = pd.read_csv(
         args.raw_denovos,
         sep="\t",
-        dtype={"sample_id": str},
+        dtype=DTYPES,
     )
+    TRGTDeNovoSchema.validate(filtered_denovos)
 
-    transmission_evidence = pd.read_csv(
-        args.transmission_evidence,
-        sep="\t",
-        dtype={"sample_id": str},
-    )
+    # read in the file containing transmission evidence for
+    # each TR de novo, if applicable
+    if args.transmission_evidence != "UNK":
+        transmission_evidence = pd.read_csv(
+            args.transmission_evidence,
+            sep=";",
+            dtype=DTYPES,
+        )
+        TransmissionSchema.validate(transmission_evidence)
+
+        filtered_denovos = filtered_denovos.merge(transmission_evidence)
 
     # read in phasing information
     phasing = pd.read_csv(
         args.phasing,
         sep="\t",
-        dtype={"sample_id": str},
+        dtype=DTYPES,
     )
+    PhasedSchema.validate(phasing)
 
-    raw_plus_transmission = raw_denovos.merge(transmission_evidence)
-
-    mutations = raw_plus_transmission.merge(phasing, how="left").fillna({"phase_summary": "unknown"})
-    mutations["likely_denovo_size_parsimony"] = mutations.apply(lambda row: utils.add_likely_de_novo_size(row, use_parsimony=True), axis=1)
-    mutations["likely_denovo_size"] = mutations.apply(lambda row: utils.add_likely_de_novo_size(row, use_parsimony=False), axis=1)
-
-
-    
+    mutations = filtered_denovos.merge(phasing, how="left").fillna({"phase_summary": "unknown"})
+    mutations["likely_denovo_size_parsimony"] = mutations.apply(
+        lambda row: utils.add_likely_de_novo_size(row, use_parsimony=True),
+        axis=1,
+    )
+    mutations["likely_denovo_size"] = mutations.apply(
+        lambda row: utils.add_likely_de_novo_size(row, use_parsimony=False),
+        axis=1,
+    )
 
     # if we 're not at a homopolymer, ensure that the likely de novo size is at least 2 bp
     mutations = mutations[

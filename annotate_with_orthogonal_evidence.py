@@ -4,6 +4,8 @@ from typing import List
 from collections import defaultdict
 import numpy as np
 
+from schema import OrthogonalSchema
+
 def annotate_with_concordance(row: pd.Series) -> str:
     """given orthogonal evidence at a locus, figure out whether
     the orthogonal evidence is concordant with the expected genotype
@@ -76,6 +78,8 @@ def main(args):
         sep="\t"
     )
     ortho_evidence = pd.read_csv(args.orthogonal_evidence)
+    OrthogonalSchema.validate(ortho_evidence)
+
     res: List[pd.DataFrame] = []
 
     for i, row in ortho_evidence.iterrows():
@@ -87,8 +91,12 @@ def main(args):
     ortho_validation = pd.DataFrame(res)
 
     # merge mutations with orthogonal validation
-    mutations = mutations.merge(ortho_validation, how="left").fillna({"validation_status": "no_data", "phase_summary": "unknown"})
-    
+    mutations = mutations.merge(ortho_validation, how="left").fillna(
+        {
+            "validation_status": "no_data",
+        }
+    )
+
     mutations.to_csv(args.out, sep="\t", index=False)
 
 

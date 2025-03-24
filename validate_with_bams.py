@@ -7,6 +7,8 @@ from collections import Counter
 from typing import List, Tuple, Union
 import math
 
+from schema import TRGTDeNovoSchema
+
 
 MATCH, INS, DEL = range(3)
 OP2DIFF = {MATCH: 0, INS: 1, DEL: -1}
@@ -190,11 +192,6 @@ def extract_diffs_from_bam(
     return diff_counts
 
 
-plt.rc("font", size=14)
-
-RC = {"A": "T", "T": "A", "C": "G", "G": "C", "N": "N"}
-
-
 def read_bam(fh: str):
     # read in BAM files for this sample, as well as parents if applicable
     bam = (
@@ -212,7 +209,8 @@ def read_bam(fh: str):
 
 def main(args):
 
-    mutations = pd.read_csv(args.mutations, sep="\t", dtype={"child_AL": str})
+    mutations = pd.read_csv(args.mutations, sep="\t", dtype={"sample_id": str})
+    TRGTDeNovoSchema.validate(mutations)
 
     # read in BAM files for this sample, as well as parents if applicable
     kid_bam, mom_bam, dad_bam = (
@@ -252,7 +250,6 @@ def main(args):
         else:
             non_denovo_al = allele_lengths[1 - denovo_idx]
 
-       
         ref_len = end - start - 1
         # calculate expected diffs between alleles and the reference genome.
         exp_diff_denovo = denovo_al - ref_len
@@ -343,11 +340,6 @@ if __name__ == "__main__":
         "--sample_id",
         help="""Name of sample ID you wish to query.""",
     )
-    # p.add_argument(
-    #     "--variant_type",
-    #     type=str,
-    #     help="Options are dnm and inherited",
-    # )
     p.add_argument(
         "--tech",
         type=str,
@@ -363,13 +355,6 @@ if __name__ == "__main__":
         help="""Path to BAM file with aligned Elements reads for the sample of interest""",
         default=None,
     )
-    
-    # p.add_argument(
-    #     "-trids",
-    #     type=str,
-    #     default=None,
-    #     help="""List of TRIDs to subset""",
-    # )
 
     args = p.parse_args()
 
