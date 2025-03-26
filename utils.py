@@ -63,7 +63,7 @@ def add_likely_de_novo_size(row: pd.Series, use_parsimony: bool = False,) -> int
     denovo_al = child_als[denovo_idx]
 
     # figure out the inferred phase of the site, if not unknown
-    phase = row["phase_summary"].split(":")[0]
+    phase = row["phase_consensus"].split(":")[0]
 
     # if phase is unknown, we *could* just use the minimum difference between the
     # de novo AL and any of the parental ALs, assuming that the smallest
@@ -84,7 +84,7 @@ def add_likely_de_novo_size(row: pd.Series, use_parsimony: bool = False,) -> int
     # about the parent-of-origin (and the haplotype-of-origin), we can do much better.
     else:
         # get de novo size using precise haplotype information
-        parent_al = row["allele_length_summary"]
+        parent_al = row["allele_length_consensus"]
         if parent_al != -1: # condition when we don't know it
             return denovo_al - parent_al
         else:

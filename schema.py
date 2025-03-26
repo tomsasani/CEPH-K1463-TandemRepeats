@@ -60,6 +60,6 @@ HaplotypedSchema = InformativeSiteSchema.add_columns({
 
 
 PhasedSchema = TRGTDeNovoSchema.add_columns({
-    "phase_summary": Column(str, required=True),
-    "allele_length_summary": Column(float, required=True),
+    "phase_consensus": Column(str, Check(lambda p: ":" in p, element_wise=True), required=True),
+    "allele_length_consensus": Column(float, Check(lambda al: al == -1 or al > 0, element_wise=True), required=True),
 })
