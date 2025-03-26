@@ -46,7 +46,9 @@ def main(args):
     )
     PhasedSchema.validate(phasing)
 
-    mutations = filtered_denovos.merge(phasing, how="left").fillna({"phase_summary": "unknown"})
+    assert phasing.shape[0] == filtered_denovos.shape[0]
+
+    mutations = filtered_denovos.merge(phasing)
     mutations["likely_denovo_size_parsimony"] = mutations.apply(
         lambda row: utils.add_likely_de_novo_size(row, use_parsimony=True),
         axis=1,

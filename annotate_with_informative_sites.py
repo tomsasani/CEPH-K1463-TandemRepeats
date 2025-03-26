@@ -7,12 +7,14 @@ from typing import List, Dict
 import cyvcf2
 from collections import namedtuple
 
+from schema import TRGTDeNovoSchema
 
 def var_pass(
     v: cyvcf2.Variant,
     idxs: np.ndarray,
     min_depth: int = 10,
     min_gq: int = 20,
+    is_male_x: bool = False,
 ) -> bool:
     """method to ensure that informative
     variants meet basic filtering criteria.
@@ -44,6 +46,7 @@ def var_pass(
 
     ad, rd = v.gt_alt_depths, v.gt_ref_depths
     td = ad + rd
+    if np.any(td < min_depth): return False
     # calculate allele balance, and require reasonable
     # allele balance for HOM_REF/HET/HOM_ALT
     ab = ad / td
@@ -77,8 +80,6 @@ def find_informative_sites_in_parents(
         mom (str): sample ID of mom.
         child (str): sample ID of child.
         smp2idx (Dict[str, int]): dictionary mapping sample IDs to integer indices in VCF FORMAT field
-        is_male_x (bool): whether the region is on the X chromosome AND the child is male.
-        is_male_y (bool): whether the region is on the Y chromosome AND the child is male.
 
     Returns:
         pd.DataFrame: pandas DataFrame containing relevant information about informative sites in the region.
@@ -141,6 +142,7 @@ def phase_informative_sites(
         dad_gt, mom_gt = site.dad_gt, site.mom_gt
         region = f"{chrom}:{start}-{end}"
         for v in vcf(region):
+        
             # access phase block PS tags. for a given sample, if two
             # variants in two different VCFs share a PS tag, their phases
             # can be inferred to be the same. e.g., a 0|1 SNP and 0|1 STR
@@ -169,13 +171,13 @@ def phase_informative_sites(
                 hap_1_origin = "mom" if kid_hap_1 == 1 else "dad"
             else:
                 continue
+            
             # store results in dictionary
             out_dict = {
                 "inf_chrom": v.CHROM,
                 "inf_pos": v.POS,
                 "dad_inf_gt": str(dad_gt), 
                 "mom_inf_gt": str(mom_gt),
-                "kid_inf_gt": "|".join((str(kid_hap_0), str(kid_hap_1))),
                 "kid_inf_ps": kid_ps,
                 "haplotype_A_origin": hap_0_origin,
                 "haplotype_B_origin": hap_1_origin,
@@ -199,7 +201,6 @@ def measure_consistency(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
             longest continuous stretch of consistent sites.
     """
 
-    
     # sort the informative sites by absolute distance to the STR
     df_sorted = df.sort_values(
         "abs_diff_to_str",
@@ -229,16 +230,20 @@ def measure_consistency(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
 
 def main(args):
 
+    # read in child's TRGT STR VCF (must be phased with HiPhase)
     KID_STR_VCF = VCF(args.str_vcf, gts012=True)
+    # read in an SNV VCF with genotypes in (at least) the child's trio.
+    # this VCF doesn't need to be phased.
     JOINT_SNP_VCF = VCF(args.joint_snp_vcf, gts012=True)
+    # read in a VCF with the child's phased SNV genotypes
     KID_SNP_VCF = VCF(args.kid_snp_vcf, gts012=True)
 
     KID_STR_SMP2IDX = dict(zip(KID_STR_VCF.samples, range(len(KID_STR_VCF.samples))))
     kid_str_idx = KID_STR_SMP2IDX[args.focal_alt]
 
-    SLOP = 250_000
-
-    mutations = pd.read_csv(args.mutations, sep="\t")
+    # read in mutations and validate schema
+    mutations = pd.read_csv(args.mutations, sep="\t", dtype={"sample_id": str})
+    TRGTDeNovoSchema.validate(mutations)
 
     res: List = []
 
@@ -265,7 +270,7 @@ def main(args):
         denovo_al = child_als[denovo_idx]
 
         # define the bounds of the region in which we'll search for informative sites
-        phase_start, phase_end = trid_start - SLOP, trid_end + SLOP
+        phase_start, phase_end = trid_start - args.slop, trid_end + args.slop
         if phase_start < 1: phase_start = 1
 
         # collate informative SNV sites within a defined region surrounding the
@@ -285,6 +290,7 @@ def main(args):
         # a reliable phase, and we can move on.
         if len(informative_sites) == 0: 
             continue
+
         # using those informative sites, we can now search the kid's *phased*
         # SNV VCF to determine which of the kid's haplotypes (A or B) carries the informative
         # allele. that is, if mom is 0/1 and dad is 1/1, and the kid is 0|1, we know that
@@ -297,6 +303,8 @@ def main(args):
             ),
             child=args.focal_alt,
         )
+        if len(informative_sites_phased) == 0:
+            continue
 
         # now, we look in the kid's phased STR VCF to figure out which
         # haplotype the STR DNM occurred on
@@ -323,11 +331,11 @@ def main(args):
 
             # access PS tag for child at the STR locus
             ps_tags = var.format("PS")[:, 0]
-            kid_ps = ps_tags[kid_str_idx]
+            kid_str_ps = ps_tags[kid_str_idx]
 
             # access the informative sites at which the PS tag in the
             # child's SNV VCF matches that of their phased STR genotype
-            matching_inf_sites = informative_sites_phased[informative_sites_phased["kid_inf_ps"] == kid_ps]
+            matching_inf_sites = informative_sites_phased[informative_sites_phased["kid_inf_ps"] == kid_str_ps]
 
             # sort those matching sites by their absolute distance to the STR
             str_midpoint = (trid_end + trid_start) // 2
@@ -342,23 +350,20 @@ def main(args):
             
             # for each informative site, add informatiion about the TR locus and append
             # to output file
-            for k,v in row_dict.items():
-                if k not in matching_inf_sites.columns:
-                    matching_inf_sites[k] = v
-
-            res.append(matching_inf_sites)
+            for _, inf_row in matching_inf_sites.iterrows():
+                inf_row_dict = inf_row.to_dict()
+                inf_row_dict.update(row_dict)
+                res.append(inf_row_dict)
 
     # combine informative sites with original mutation dataframe
-    combined_informative_sites = pd.concat(res).drop(
+    combined_informative_sites = pd.DataFrame(res).drop(
         columns=[
-            "kid_inf_gt",
             "kid_inf_ps",
             "haplotype_A_origin",
             "haplotype_B_origin",
             "diff_to_str",
         ]
     )
-
     merged = mutations.merge(combined_informative_sites, how="left")
 
     # fill NA values for DNMs without any informative sites
@@ -377,14 +382,55 @@ def main(args):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--mutations")
-    p.add_argument("--joint_snp_vcf")
-    p.add_argument("--kid_snp_vcf")
-    p.add_argument("--focal")
-    p.add_argument("--focal_alt")
-    p.add_argument("--out")
-    p.add_argument("--str_vcf")
-    p.add_argument("--dad_id")
-    p.add_argument("--mom_id")
+    p.add_argument(
+        "--mutations",
+        required=True,
+        help="""TSV file containing TRGT-denovo output for the child with candidate DNMs""",
+    )
+    p.add_argument(
+        "--joint_snp_vcf",
+        required=True,
+        help="""VCF file containing SNV genotypes for (at least) the child's corresponding trio. does not need to be phased with HiPhase.""",
+    )
+    p.add_argument(
+        "--kid_snp_vcf",
+        required=True,
+        help="""VCF file containing phased SNV genotypes in the child.""",
+    )
+    p.add_argument(
+        "--focal",
+        required=True,
+        help="""sample ID for the child (CEPH LABID)""",
+    )
+    p.add_argument(
+        "--focal_alt", required=True, help="""sample ID for the child (Coriell ID)"""
+    )
+    p.add_argument(
+        "--out",
+        required=True,
+        help="""name of output TSV file.""",
+    )
+    p.add_argument(
+        "--str_vcf",
+        required=True,
+        help="""VCF file containing STR genotypes in the child. must be phased with HiPhase.""",
+    )
+    p.add_argument(
+        "--dad_id",
+        required=True,
+        help="""Coriell ID of father in trio.""",
+    )
+    p.add_argument(
+        "--mom_id",
+        required=True,
+        help="""Coriell ID of mother in trio""",
+    )
+    p.add_argument(
+        "-slop",
+        default=250_000,
+        required=False,
+        type=int,
+        help="""how many base pairs upstream and downstream of the candidate STR DNM to look for informative sites for parent-of-origin inference.""",
+    )
     args = p.parse_args()
     main(args)
