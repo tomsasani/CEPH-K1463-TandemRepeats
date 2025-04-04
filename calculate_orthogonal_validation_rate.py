@@ -9,25 +9,26 @@ import scipy.stats as ss
 plt.rc("font", size=14)
 
 TECH = "element"
-ASSEMBLY = "GRCh38"
+ASSEMBLY = "CHM13v2"
 MIN_SIZE = 1
 
 # get mutations
 mutations = []
-for fh in glob.glob(f"tr_validation/downsampled/csv/orthogonal_support/*.{ASSEMBLY}.{TECH}.tsv"):
+for fh in glob.glob(f"tr_validation/csv/orthogonal_support/*.{ASSEMBLY}.{TECH}.tsv"):
     df = pd.read_csv(
         fh,
         sep="\t",
         dtype={"sample_id": str},
     )
     df = df[df["simple_motif_size"] == "STR"]
-    # df = df[df["paternal_id"] == 2209]
 
     mutations.append(df)
 
 mutations = pd.concat(mutations)
+
+mutations = mutations[mutations["paternal_id"] == 2209]
 mutations = mutations[np.abs(mutations["likely_denovo_size"]) >= MIN_SIZE]
-mutations["is_phased"] = mutations["phase_summary"].apply(lambda p: "Y" if p != "unknown" else "N")
+mutations["is_phased"] = mutations["phase_consensus"].apply(lambda p: "Y" if p != "unknown" else "N")
 mutations["is_phased_int"] = mutations["is_phased"].apply(lambda p: 1 if p == "Y" else 0)
 
 # FILTERING
@@ -36,7 +37,7 @@ mutations = mutations[mutations["max_al"] <= 120]
 mutations = mutations[mutations["validation_status"] != "no_data"]
 mutations["is_homopolymer"] = mutations["max_motiflen"] == 1
 
-print (mutations.groupby(["sample_id", "validation_status"]).size())
+print (mutations.groupby(["is_homopolymer", "validation_status"]).size())
 
 # fisher's exact test to see if phased stuff is more likely to be validated
 a_fore = mutations.query("validation_status == 'pass' and is_phased == 'Y'").shape[0]
@@ -54,9 +55,9 @@ sns.pointplot(
     data=mutations,
     x="is_phased",
     y="is_validated",
-    hue="is_phased",
+    hue="is_homopolymer",
     ax=ax,
-    dodge=True,
+    # dodge=True,
     linestyle="none",
 )
 ax.set_xlabel("DNM has a confident POI?")

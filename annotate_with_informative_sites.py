@@ -142,7 +142,6 @@ def phase_informative_sites(
         dad_gt, mom_gt = site.dad_gt, site.mom_gt
         region = f"{chrom}:{start}-{end}"
         for v in vcf(region):
-        
             # access phase block PS tags. for a given sample, if two
             # variants in two different VCFs share a PS tag, their phases
             # can be inferred to be the same. e.g., a 0|1 SNP and 0|1 STR
@@ -176,8 +175,8 @@ def phase_informative_sites(
             out_dict = {
                 "inf_chrom": v.CHROM,
                 "inf_pos": v.POS,
-                "dad_inf_gt": str(dad_gt), 
-                "mom_inf_gt": str(mom_gt),
+                "dad_inf_gt": dad_gt, 
+                "mom_inf_gt": mom_gt,
                 "kid_inf_ps": kid_ps,
                 "haplotype_A_origin": hap_0_origin,
                 "haplotype_B_origin": hap_1_origin,
@@ -185,47 +184,6 @@ def phase_informative_sites(
             res.append(out_dict)
 
     return pd.DataFrame(res)
-
-
-def measure_consistency(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
-    """given a dataframe that contains information about informative sites
-    surrounding a candidate DNM, find the longest stretch of 'consistent'
-    informative sites that all support the same haplotype assignment.
-
-    Args:
-        df (pd.DataFrame): pandas DataFrame object containing information about informative sites.
-        columns (List[str]): list of columns to use in consistency checks
-
-    Returns:
-        pd.DataFrame: pandas DataFrame containing a subset of only the informative sites in the
-            longest continuous stretch of consistent sites.
-    """
-
-    # sort the informative sites by absolute distance to the STR
-    df_sorted = df.sort_values(
-        "abs_diff_to_str",
-        ascending=True,
-    ).reset_index(drop=True)
-
-    sorted_values = df_sorted[columns].values
-
-    # figure out how many sites are consistent closest to the STR. we can do this
-    # simply by figuring out the first index where they are *inconsistent.*
-    inconsistent_phases = np.where(sorted_values[1:] != sorted_values[:-1])[0]
-
-    # if we have more than 1 informative site and none of them are inconsistent,
-    # then all of them are consistent
-    if sorted_values.shape[0] > 1 and inconsistent_phases.shape[0] == 0:
-        df_sorted_consistent = df_sorted.iloc[:]
-    # if we have more than 1 informative site and some of them are inconsistent,
-    # return the consistent ones up until the first inconsistency.
-    elif sorted_values.shape[0] > 1 and inconsistent_phases.shape[0] > 0:
-        df_sorted_consistent = df_sorted.iloc[:inconsistent_phases[0]]
-    # if we only have one informative site
-    else:
-        df_sorted_consistent = df_sorted.iloc[:]
-
-    return df_sorted_consistent
 
 
 def main(args):
@@ -320,6 +278,7 @@ def main(args):
 
             allele_lengths = [len(var.REF)] + [len(a) for a in var.ALT]
             assert denovo_al == allele_lengths[row["genotype"]]
+
             # figure out the haplotype on which the de novo allele occurred
             denovo_hap_id = None
             if hap_a == row["genotype"]:

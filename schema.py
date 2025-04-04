@@ -9,16 +9,19 @@ BaseSchema = DataFrameSchema(
     }
 )
 
-TRGTDeNovoSchema = BaseSchema.add_columns({
-    "genotype": Column(int, Check.isin([0, 1, 2]), required=True),
-    "denovo_coverage": Column(int, required=True),
-    "child_ratio": Column(float, required=True),
-    "per_allele_reads_father": Column(str, required=True, coerce=True),
-    "per_allele_reads_mother": Column(str, required=True),
-    "child_coverage": Column(int, required=True),
-    "father_overlap_coverage": Column(str, required=True, coerce=True),
-    "mother_overlap_coverage": Column(str, required=True),
-})
+TRGTDeNovoSchema = BaseSchema.add_columns(
+    {
+        "genotype": Column(int, Check.isin([0, 1, 2]), required=True),
+        "denovo_coverage": Column(int, required=True),
+        "child_ratio": Column(float, required=True),
+        "per_allele_reads_father": Column(str, required=True, nullable=False, coerce=True),
+        "per_allele_reads_mother": Column(str, required=True, nullable=False, coerce=True),
+        "child_coverage": Column(int, required=True),
+        "father_overlap_coverage": Column(str, required=True, nullable=False, coerce=True),
+        "mother_overlap_coverage": Column(str, required=True, nullable=False, coerce=True),
+        "child_AL": Column(str, required=True, nullable=False),
+    }
+)
 
 
 TransmissionSchema = BaseSchema.add_columns(
@@ -34,32 +37,51 @@ TransmissionSchema = BaseSchema.add_columns(
 )
 
 
-OrthogonalSchema = TRGTDeNovoSchema.add_columns({
-    "kid_evidence": Column(str, required=True),
-    "mom_evidence": Column(str, required=True),
-    "dad_evidence": Column(str, required=True),
-    "exp_allele_diff_denovo": Column(int, required=True),
-    "exp_allele_diff_non_denovo": Column(int, required=True),
-})
+OrthogonalSchema = TRGTDeNovoSchema.add_columns(
+    {
+        "kid_evidence": Column(str, required=True),
+        "mom_evidence": Column(str, required=True),
+        "dad_evidence": Column(str, required=True),
+        "exp_allele_diff_denovo": Column(int, required=True),
+        "exp_allele_diff_non_denovo": Column(int, required=True),
+    }
+)
 
 
-InformativeSiteSchema = TRGTDeNovoSchema.add_columns({
-    "inf_chrom": Column(str, required=True),
-    "inf_pos": Column(int, required=True, coerce=True),
-    "dad_inf_gt": Column(int, required=True),
-    "mom_inf_gt": Column(int, required=True),
-    "str_parent_of_origin": Column(str, required=True),
-    "abs_diff_to_str": Column(float, required=True, nullable=True)
-})
+InformativeSiteSchema = TRGTDeNovoSchema.add_columns(
+    {
+        "inf_chrom": Column(str, required=True),
+        "inf_pos": Column(int, required=True, coerce=True),
+        "dad_inf_gt": Column(float, required=True),
+        "mom_inf_gt": Column(float, required=True),
+        "str_parent_of_origin": Column(str, required=True),
+        "abs_diff_to_str": Column(float, required=True, nullable=True),
+    }
+)
 
 
-HaplotypedSchema = InformativeSiteSchema.add_columns({
-    "haplotype_in_parent": Column(str, required=True),
-    "allele_length_in_parent": Column(float, required=True),
-})
+HaplotypedSchema = InformativeSiteSchema.add_columns(
+    {
+        "haplotype_in_parent": Column(str, required=True),
+        # "precursor_allele_length_in_parent": Column(float, required=True),
+        # "precursor_sequence_in_parent": Column(str, required=True),
+        # "untransmitted_sequence_in_parent": Column(str, required=True),
+        # "precursor_AP": Column(float, required=True),
+        # "untransmitted_AP": Column(float, required=True),
+    }
+)
 
 
-PhasedSchema = TRGTDeNovoSchema.add_columns({
-    "phase_consensus": Column(str, Check(lambda p: ":" in p, element_wise=True), required=True),
-    "allele_length_consensus": Column(float, Check(lambda al: al == -1 or al > 0, element_wise=True), required=True),
-})
+PhasedSchema = TRGTDeNovoSchema.add_columns(
+    {
+        "phase_consensus": Column(
+            str,
+            Check(lambda p: ":" in p, element_wise=True),
+            required=True,
+        ),
+        "haplotype_in_parent_consensus": Column(
+            str,
+            required=True,
+        ),
+    }
+)

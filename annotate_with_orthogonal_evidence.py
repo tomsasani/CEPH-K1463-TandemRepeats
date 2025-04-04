@@ -45,12 +45,13 @@ def annotate_with_concordance(row: pd.Series) -> str:
 
     # validate by asking if the de novo allele is observed in the
     # child and absent from both parents
-
     out_dict = defaultdict(int)
     out_dict_off_by_one = defaultdict(int)
 
-    for diffs, label in zip((kid_diffs, mom_diffs, dad_diffs), ["kid", "mom", "dad"]):
-
+    for diffs, label in zip(
+        (kid_diffs, mom_diffs, dad_diffs),
+        ["kid", "mom", "dad"],
+    ):
         dn_overlap, dn_overlap_off = 0, 0
         # allow for off-by-one errors when asking if kid has de novo.
         # don't allow for off-by-one errors when asking if parents have de novo.
@@ -75,9 +76,13 @@ def main(args):
 
     mutations = pd.read_csv(
         args.mutations,
-        sep="\t"
+        sep="\t",
+        dtype={"sample_id": str},
     )
-    ortho_evidence = pd.read_csv(args.orthogonal_evidence)
+    ortho_evidence = pd.read_csv(
+        args.orthogonal_evidence,
+        dtype={"sample_id": str},
+    )
     OrthogonalSchema.validate(ortho_evidence)
 
     res: List[pd.DataFrame] = []
@@ -102,8 +107,20 @@ def main(args):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--mutations")
-    p.add_argument("--orthogonal_evidence")
-    p.add_argument("--out")
+    p.add_argument(
+        "--mutations",
+        required=True,
+        help="""lightly filtered mutations in TSV format""",
+    )
+    p.add_argument(
+        "--orthogonal_evidence",
+        required=True,
+        help="""mutations annotated with orthogonal read evidence in mom, dad, and kid""",
+    )
+    p.add_argument(
+        "--out",
+        required=True,
+        help="""path to output TSV file""",
+    )
     args = p.parse_args()
     main(args)

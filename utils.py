@@ -84,7 +84,7 @@ def add_likely_de_novo_size(row: pd.Series, use_parsimony: bool = False,) -> int
     # about the parent-of-origin (and the haplotype-of-origin), we can do much better.
     else:
         # get de novo size using precise haplotype information
-        parent_al = row["allele_length_consensus"]
+        parent_al = row["precursor_allele_length_in_parent"]
         if parent_al != -1: # condition when we don't know it
             return denovo_al - parent_al
         else:
@@ -165,7 +165,7 @@ def filter_mutation_dataframe(
     Returns:
         pd.DataFrame: filtered pd.DataFrame object.
     """
-
+    
     # validate schema of input dataframe
     TRGTDeNovoSchema.validate(mutations)
 
@@ -235,3 +235,12 @@ def infer_combined_phase(row: pd.Series):
         else: combined_phase = "unknown"
     
     return combined_phase
+
+def check_for_grandparental_evidence(row: pd.Series):
+
+    grandparental_als = list(map(int, row["grandparental_als"].split(",")))
+    child_als = list(map(int, row["child_AL"].split(",")))
+    denovo_idx = row["index"]
+    denovo_al = child_als[denovo_idx]
+    # print (denovo_al, row["grandparents"], grandparental_als)
+    return denovo_al in grandparental_als
