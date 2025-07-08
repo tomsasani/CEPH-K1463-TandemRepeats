@@ -123,16 +123,27 @@ rule index_sample_bams:
         samtools index -@ {threads} {input.bam_fh}
         """
 
+rule create_chrom_bed:
+    input:
+        repeats = lambda wildcards: ASSEMBLY2CATALOG[wildcards.ASSEMBLY]
+    output:
+        temp("data/catalogs/{CHROM}.{ASSEMBLY}.catalog.bed.gz")
+    shell:
+        """
+        zgrep -w {wildcards.CHROM} {input.repeats} | bgzip > {output}
+        """
+
+
 rule run_trgt:
     input:
         bam = lambda wildcards: get_complete_bams(wildcards),
         bam_idx = lambda wildcards: get_complete_bams(wildcards) + ".bai",
         reference = REF_FH,
         trgt_binary = "/uufs/chpc.utah.edu/common/HIPAA/u1006375/src/trgt-v3.0.0-x86_64-unknown-linux-gnu/trgt",
-        repeats = lambda wildcards: ASSEMBLY2CATALOG[wildcards.ASSEMBLY]
+        repeats = "data/catalogs/{CHROM}.{ASSEMBLY}.catalog.bed.gz"
     output:
-        vcf = temp("data/trgt/{SAMPLE}.{ASSEMBLY}.vcf.gz"),
-        bam = temp("data/trgt/{SAMPLE}.{ASSEMBLY}.spanning.bam")
+        vcf = temp("data/trgt/per-chrom/{CHROM}.{SAMPLE}.{ASSEMBLY}.vcf.gz"),
+        bam = temp("data/trgt/per-chrom/{CHROM}.{SAMPLE}.{ASSEMBLY}.spanning.bam")
     threads: 8
     shell:
         """
@@ -140,7 +151,33 @@ rule run_trgt:
                             --genome {input.reference} \
                             --repeats {input.repeats} \
                             --reads {input.bam} \
-                            --output-prefix "data/trgt/{wildcards.SAMPLE}.{wildcards.ASSEMBLY}"
+                            --output-prefix "data/trgt/per-chrom/{wildcards.CHROM}.{wildcards.SAMPLE}.{wildcards.ASSEMBLY}"
+        """
+
+rule merge_trgt_bams:
+    input:
+        bams = expand("data/trgt/per-chrom/{CHROM}.{{SAMPLE}}.{{ASSEMBLY}}.vcf.gz", CHROM=CHROMS)
+    output:
+        "data/trgt/{SAMPLE}.{ASSEMBLY}.spanning.bam"
+    threads: 8
+    shell:
+        """
+        module load samtools
+        
+        samtools merge -O BAM -o {output} -@ {threads} {input.bams}
+        """
+
+rule merge_trgt_vcfs:
+    input:
+        vcfs = expand("data/trgt/per-chrom/{CHROM}.{{SAMPLE}}.{{ASSEMBLY}}.spanning.bam", CHROM=CHROMS)
+    output:
+        "data/trgt/{SAMPLE}.{ASSEMBLY}.vcf.gz"
+    threads: 8
+    shell:
+        """
+        module load bcftools
+        
+        bcftools concat -Oz -o {output} --threads {threads} {input.vcfs}
         """
 
 
