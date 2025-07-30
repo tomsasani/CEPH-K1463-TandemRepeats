@@ -46,6 +46,8 @@ CHROMS = list(map(str, range(1, 23)))
 CHROMS = [f"chr{c}" for c in CHROMS]
 CHROMS.extend(["chrX", "chrY"])
 
+CHROMS = ["chr1"]
+
 def get_raw_ccs_bams(wildcards):
     seqruns = SMP2SEQRUNS[wildcards.SAMPLE]
     bcids = SMP2BCIDS[wildcards.SAMPLE]
@@ -75,12 +77,16 @@ wildcard_constraints:
     ASSEMBLY = "CHM13v2",
     CHROM = "chr[0-9]{1,2}|chrX|chrY"
 
+ALL_SAMPLES = ["2209", "2188", "2211"]
+CHILDREN = ["2211"]
 
 rule all:
     input:
         dnms = expand("csv/{SAMPLE}.{ASSEMBLY}.trgt-denovo.csv", SAMPLE=CHILDREN, ASSEMBLY=["CHM13v2"]),
-        vcf = expand("data/trgt/{SAMPLE}.{ASSEMBLY}.phased.vcf.gz", SAMPLE=CHILDREN, ASSEMBLY=["CHM13v2"]),
-        trio_vcf = expand("data/vcf/trios/merged/{SAMPLE}.{ASSEMBLY}.vcf.gz", SAMPLE=CHILDREN, ASSEMBLY=["CHM13v2"])
+        vcf = expand("data/trgt/{SAMPLE}.{ASSEMBLY}.phased.vcf.gz", SAMPLE=ALL_SAMPLES, ASSEMBLY=["CHM13v2"]),
+        trio_vcf = expand("data/vcf/trios/merged/{SAMPLE}.{ASSEMBLY}.vcf.gz.tbi", SAMPLE=CHILDREN, ASSEMBLY=["CHM13v2"]),
+        phased_snv = expand("data/vcf/snv/{SAMPLE}.{ASSEMBLY}.phased.vcf.gz", SAMPLE=CHILDREN, ASSEMBLY=["CHM13v2"])
+
 
 rule align_ccs_bam:
     input:
@@ -213,16 +219,16 @@ rule sort_vcf:
     input: "data/trgt/{SAMPLE}.{ASSEMBLY}.vcf.gz"
     output:
         vcf = "data/trgt/{SAMPLE}.{ASSEMBLY}.sorted.vcf.gz",
-        idx = "data/trgt/{SAMPLE}.{ASSEMBLY}.sorted.vcf.gz.csi"
+        idx = "data/trgt/{SAMPLE}.{ASSEMBLY}.sorted.vcf.gz.tbi"
     shell:
         """
         module load bcftools
         
         bcftools sort -Ob -o {output.vcf} {input}
-        bcftools index {output.vcf}
+        bcftools index --tbi {output.vcf}
         """
 
-
+# https://github.com/PacificBiosciences/wdl-common/blob/2ae390d4ed6b80dd2a2ef10c960832ffa8c7d1d3/wdl/workflows/deepvariant/deepvariant.wdl
 rule call_snvs:
     input:
         ref = REF_FH,
@@ -236,7 +242,9 @@ rule call_snvs:
     params:
         alt_sample_id = lambda wildcards: SMP2ALT[wildcards.SAMPLE]
     resources:
-        mem_mb = 64_000
+        mem_mb = 64_000,
+        slurm_account = "quinlan-rw",
+        slurm_partition = "quinlan-rw",
     shell:
         """
         module load singularity
@@ -253,7 +261,7 @@ rule call_snvs:
                                                 --reads {input.bam} \
                                                 --ref {input.ref} \
                                                 --regions {wildcards.CHROM} \
-                                                --make_examples_extra_args "vsc_min_count_snps=2,vsc_min_fraction_snps=0.12,vsc_min_count_indels=2,vsc_min_fraction_indels=0.12" \
+                                                --make_examples_extra_args "vsc_min_fraction_indels=0.5,min_mapping_quality=1" \
                                                 --sample_name {params.alt_sample_id}
         """
 
@@ -267,7 +275,19 @@ rule combine_sample_vcfs:
         """
         module load bcftools
         
-        bcftools concat {input.vcfs} | bcftools view --threads {threads} -t ^chrEBV,phix | grep -v 'ID=chrEB\|ID=phix' | bgzip > {output}
+        bcftools concat {input.vcfs} | bcftools view --threads {threads} -f 'PASS' -t ^chrEBV,phix | grep -v 'ID=chrEB\|ID=phix' | bgzip > {output}
+        """
+
+
+rule index_sample_vcfs:
+    input: "data/vcf/snv/raw/{SAMPLE}.{ASSEMBLY}.vcf.gz"
+    output: "data/vcf/snv/raw/{SAMPLE}.{ASSEMBLY}.vcf.gz.tbi"
+    threads: 4
+    shell:
+        """
+        module load bcftools
+        
+        bcftools index --tbi --threads {threads} {input}
         """
 
 
@@ -277,7 +297,7 @@ rule run_hiphase:
         snv_vcf = "data/vcf/snv/raw/{SAMPLE}.{ASSEMBLY}.vcf.gz",
         snv_vcf_idx = "data/vcf/snv/raw/{SAMPLE}.{ASSEMBLY}.vcf.gz.tbi",
         str_vcf = "data/trgt/{SAMPLE}.{ASSEMBLY}.sorted.vcf.gz",
-        str_vcf_idx = "data/trgt/{SAMPLE}.{ASSEMBLY}.sorted.vcf.gz.csi",
+        str_vcf_idx = "data/trgt/{SAMPLE}.{ASSEMBLY}.sorted.vcf.gz.tbi",
         bam = lambda wildcards: get_complete_bams(wildcards),
         bam_idx = lambda wildcards: get_complete_bams(wildcards) + ".bai",
         reference = REF_FH
@@ -295,7 +315,7 @@ rule run_hiphase:
                       --vcf {input.str_vcf} \
                       --reference {input.reference} \
                       --output-vcf {output.snv_vcf} \
-                      --output-vcf {output.str_vcf}
+                      --output-vcf {output.str_vcf} \
 
         """
 
@@ -320,6 +340,7 @@ rule combine_trio_chrom_vcfs:
         singularity exec --cleanenv -H $SINGULARITYENV_TMPDIR -B /usr/lib/locale/:/usr/lib/locale/ \
                                             {input.sif} \
                                             /usr/local/bin/glnexus_cli \
+                                            --dir gl_nexus_dbs/{wildcards.SAMPLE}_{wildcards.ASSEMBLY}_{wildcards.CHROM} \
                                             --config DeepVariant_unfiltered \
                                             --mem-gbytes 32 \
                                             --threads {threads} \
@@ -366,10 +387,10 @@ rule run_trgt_denovo:
         dad_bam = lambda wildcards: "data/trgt/" + SMP2DAD[wildcards.SAMPLE] + "." + wildcards.ASSEMBLY + ".spanning.sorted.bam",
     output:
         output = "csv/{SAMPLE}.{ASSEMBLY}.trgt-denovo.csv"
-    threads: 8
+    threads: 32
     resources:
-        mem_mb = 32_000,
-        runtime = 60 * 24
+        mem_mb = 64_000,
+        runtime = 1_920
     params:
         kid_pref = lambda wildcards: f"data/trgt/{wildcards.SAMPLE}.{wildcards.ASSEMBLY}",
         mom_pref = lambda wildcards: f"data/trgt/{SMP2MOM[wildcards.SAMPLE]}.{wildcards.ASSEMBLY}",
@@ -382,5 +403,5 @@ rule run_trgt_denovo:
                                         --mother {params.mom_pref} \
                                         --child {params.kid_pref} \
                                         --out {output} \
-                                        -@ 8
+                                        -@ {threads}
         """
