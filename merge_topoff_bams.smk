@@ -46,7 +46,7 @@ CHROMS = list(map(str, range(1, 23)))
 CHROMS = [f"chr{c}" for c in CHROMS]
 CHROMS.extend(["chrX", "chrY"])
 
-CHROMS = ["chr1"]
+CHILDREN = ["2211"]
 
 def get_raw_ccs_bams(wildcards):
     seqruns = SMP2SEQRUNS[wildcards.SAMPLE]
@@ -57,18 +57,21 @@ def get_raw_ccs_bams(wildcards):
     return o
 
 
-def get_complete_bams(wildcards):
+def get_complete_bams(wildcards, sample):
     """
     return the path to the 'complete' BAM file for a given sample.
     if the sample is one of the four with top-up sequencing, return a path
     that requires us to re-align and merge the updated top-up data. otherwise
     return the original path to the HiFi BAM
     """
-    if wildcards.SAMPLE in ("200100", "2189", "2216", "200080"):
-        return NEW_PATH + f"/merged/{wildcards.SAMPLE}.merged.bam"
+    # if wildcards.SAMPLE in ("200100", "2189", "2216", "200080"):
+    #     return NEW_PATH + f"/merged/{wildcards.SAMPLE}.merged.bam"
+    if sample in ("200100", "2189", "2216", "200080"):
+        return NEW_PATH + f"/merged/{sample}.merged.bam"
     else:
         assembly_adj = wildcards.ASSEMBLY.split('v2')[0]
-        sample_id = SMP2ALT[wildcards.SAMPLE]
+        #sample_id = SMP2ALT[wildcards.SAMPLE]
+        sample_id = SMP2ALT[sample]
         return "/scratch/ucgd/lustre-labs/quinlan/data-shared/datasets/Palladium/hifi-bams/{0}/{1}.{2}.haplotagged.bam".format(assembly_adj, sample_id, assembly_adj.lower() if 'CHM' in wildcards.ASSEMBLY else assembly_adj,)
 
 
@@ -77,8 +80,6 @@ wildcard_constraints:
     ASSEMBLY = "CHM13v2",
     CHROM = "chr[0-9]{1,2}|chrX|chrY"
 
-ALL_SAMPLES = ["2209", "2188", "2211"]
-CHILDREN = ["2211"]
 
 rule all:
     input:
@@ -189,6 +190,7 @@ rule merge_trgt_bams:
         samtools merge -O BAM -o {output} -@ {threads} {input.bams}
         """
 
+
 rule merge_trgt_vcfs:
     input:
         vcfs = expand("data/trgt/per-chrom/{CHROM}.{{SAMPLE}}.{{ASSEMBLY}}.vcf.gz", CHROM=CHROMS)
@@ -229,46 +231,76 @@ rule sort_vcf:
         """
 
 # https://github.com/PacificBiosciences/wdl-common/blob/2ae390d4ed6b80dd2a2ef10c960832ffa8c7d1d3/wdl/workflows/deepvariant/deepvariant.wdl
-rule call_snvs:
+# rule call_snvs:
+#     input:
+#         ref = REF_FH,
+#         bam = lambda wildcards: get_complete_bams(wildcards),
+#         bam_idx = lambda wildcards: get_complete_bams(wildcards) + ".bai",
+#         sif = "deepvariant_1.9.0.sif"
+#     output:
+#         vcf = "data/vcf/snv/per-chrom/{SAMPLE}.{ASSEMBLY}.{CHROM}.vcf.gz",
+#         gvcf = "data/vcf/snv/per-chrom/{SAMPLE}.{ASSEMBLY}.{CHROM}.g.vcf.gz",
+#     threads: 8
+#     params:
+#         alt_sample_id = lambda wildcards: SMP2ALT[wildcards.SAMPLE]
+#     resources:
+#         mem_mb = 64_000,
+#         slurm_account = "quinlan-rw",
+#         slurm_partition = "quinlan-rw",
+#     shell:
+#         """
+#         module load singularity
+
+#         export SINGULARITYENV_TMPDIR=/scratch/ucgd/lustre-labs/quinlan/u1006375/CEPH-K1463-TandemRepeats/deep_variant_tmp/
+
+#         singularity exec --cleanenv -H $SINGULARITYENV_TMPDIR -B /usr/lib/locale/:/usr/lib/locale/ \
+#                                             {input.sif} \
+#                                             run_deepvariant \
+#                                                 --model_type PACBIO \
+#                                                 --num_shards {threads} \
+#                                                 --output_vcf {output.vcf} \
+#                                                 --output_gvcf {output.gvcf} \
+#                                                 --reads {input.bam} \
+#                                                 --ref {input.ref} \
+#                                                 --regions {wildcards.CHROM} \
+#                                                 --make_examples_extra_args "vsc_min_fraction_indels=0.5,min_mapping_quality=1" \
+#                                                 --sample_name {params.alt_sample_id}
+#         """
+
+rule call_trio_snvs:
     input:
         ref = REF_FH,
-        bam = lambda wildcards: get_complete_bams(wildcards),
-        bam_idx = lambda wildcards: get_complete_bams(wildcards) + ".bai",
-        sif = "deepvariant_1.9.0.sif"
+        kid_bam = lambda wildcards: get_complete_bams(wildcards, wildcards.SAMPLE),
+        kid_bam_idx = lambda wildcards: get_complete_bams(wildcards, wildcards.SAMPLE) + ".bai",
+        dad_bam = lambda wildcards: get_complete_bams(wildcards, SMP2DAD[wildcards.SAMPLE]),
+        dad_bam_idx = lambda wildcards: get_complete_bams(wildcards, SMP2DAD[wildcards.SAMPLE]) + ".bai",
+        mom_bam = lambda wildcards: get_complete_bams(wildcards, SMP2MOM[wildcards.SAMPLE]),
+        mom_bam_idx = lambda wildcards: get_complete_bams(wildcards, SMP2MOM[wildcards.SAMPLE]) + ".bai",
+        sif = "deepvariant_deeptrio-1.9.0.sif"
     output:
-        vcf = "data/vcf/snv/per-chrom/{SAMPLE}.{ASSEMBLY}.{CHROM}.vcf.gz",
-        gvcf = "data/vcf/snv/per-chrom/{SAMPLE}.{ASSEMBLY}.{CHROM}.g.vcf.gz",
+        kid_vcf = "data/vcf/snv/per-chrom/{SAMPLE}.kid.{ASSEMBLY}.{CHROM}.vcf.gz",
+        kid_gvcf = "data/vcf/snv/per-chrom/{SAMPLE}.kid.{ASSEMBLY}.{CHROM}.g.vcf.gz",
+        dad_vcf = "data/vcf/snv/per-chrom/{SAMPLE}.dad.{ASSEMBLY}.{CHROM}.vcf.gz",
+        dad_gvcf = "data/vcf/snv/per-chrom/{SAMPLE}.dad.{ASSEMBLY}.{CHROM}.g.vcf.gz",
+        mom_vcf = "data/vcf/snv/per-chrom/{SAMPLE}.mom.{ASSEMBLY}.{CHROM}.vcf.gz",
+        mom_gvcf = "data/vcf/snv/per-chrom/{SAMPLE}.mom.{ASSEMBLY}.{CHROM}.g.vcf.gz",
     threads: 8
     params:
-        alt_sample_id = lambda wildcards: SMP2ALT[wildcards.SAMPLE]
+        kid_name = lambda wildcards: SMP2ALT[wildcards.SAMPLE],
+        dad_name = lambda wildcards: SMP2ALT[SMP2DAD[wildcards.SAMPLE]],
+        mom_name = lambda wildcards: SMP2ALT[SMP2MOM[wildcards.SAMPLE]],
     resources:
         mem_mb = 64_000,
         slurm_account = "quinlan-rw",
         slurm_partition = "quinlan-rw",
-    shell:
-        """
-        module load singularity
+    script:
+        "scripts/run_deeptrio.sh"
 
-        export SINGULARITYENV_TMPDIR=/scratch/ucgd/lustre-labs/quinlan/u1006375/CEPH-K1463-TandemRepeats/deep_variant_tmp/
-
-        singularity exec --cleanenv -H $SINGULARITYENV_TMPDIR -B /usr/lib/locale/:/usr/lib/locale/ \
-                                            {input.sif} \
-                                            run_deepvariant \
-                                                --model_type PACBIO \
-                                                --num_shards {threads} \
-                                                --output_vcf {output.vcf} \
-                                                --output_gvcf {output.gvcf} \
-                                                --reads {input.bam} \
-                                                --ref {input.ref} \
-                                                --regions {wildcards.CHROM} \
-                                                --make_examples_extra_args "vsc_min_fraction_indels=0.5,min_mapping_quality=1" \
-                                                --sample_name {params.alt_sample_id}
-        """
 
 # create sample-level VCFs that we'll use for hiphase
 rule combine_sample_vcfs:
     input:
-        vcfs = expand("data/vcf/snv/per-chrom/{{SAMPLE}}.{{ASSEMBLY}}.{CHROM}.vcf.gz", CHROM=CHROMS)
+        vcfs = expand("data/vcf/snv/per-chrom/{{SAMPLE}}.kid.{{ASSEMBLY}}.{CHROM}.vcf.gz", CHROM=CHROMS)
     output: "data/vcf/snv/raw/{SAMPLE}.{ASSEMBLY}.vcf.gz"
     threads: 8
     shell:
@@ -298,8 +330,8 @@ rule run_hiphase:
         snv_vcf_idx = "data/vcf/snv/raw/{SAMPLE}.{ASSEMBLY}.vcf.gz.tbi",
         str_vcf = "data/trgt/{SAMPLE}.{ASSEMBLY}.sorted.vcf.gz",
         str_vcf_idx = "data/trgt/{SAMPLE}.{ASSEMBLY}.sorted.vcf.gz.tbi",
-        bam = lambda wildcards: get_complete_bams(wildcards),
-        bam_idx = lambda wildcards: get_complete_bams(wildcards) + ".bai",
+        bam = lambda wildcards: get_complete_bams(wildcards, wildcards.SAMPLE),
+        bam_idx = lambda wildcards: get_complete_bams(wildcards, wildcards.SAMPLE) + ".bai",
         reference = REF_FH
     output:
         snv_vcf = "data/vcf/snv/{SAMPLE}.{ASSEMBLY}.phased.vcf.gz",
@@ -324,9 +356,9 @@ rule run_hiphase:
 rule combine_trio_chrom_vcfs:
     input:
         sif = "glnexus_v1.2.7.sif",
-        kid_snp_gvcf = "data/vcf/snv/per-chrom/{SAMPLE}.{ASSEMBLY}.{CHROM}.g.vcf.gz",
-        dad_snp_gvcf = lambda wildcards: f"data/vcf/snv/per-chrom/{SMP2DAD[wildcards.SAMPLE]}.{wildcards.ASSEMBLY}.{wildcards.CHROM}.g.vcf.gz",
-        mom_snp_gvcf = lambda wildcards: f"data/vcf/snv/per-chrom/{SMP2MOM[wildcards.SAMPLE]}.{wildcards.ASSEMBLY}.{wildcards.CHROM}.g.vcf.gz",
+        kid_snp_gvcf = "data/vcf/snv/per-chrom/{SAMPLE}.kid.{ASSEMBLY}.{CHROM}.g.vcf.gz",
+        dad_snp_gvcf = "data/vcf/snv/per-chrom/{SAMPLE}.dad.{ASSEMBLY}.{CHROM}.g.vcf.gz",
+        mom_snp_gvcf = "data/vcf/snv/per-chrom/{SAMPLE}.mom.{ASSEMBLY}.{CHROM}.g.vcf.gz",
     output: "data/vcf/trios/per-chrom/{SAMPLE}.{ASSEMBLY}.{CHROM}.trio.vcf.gz"
     threads: 4
     resources:
