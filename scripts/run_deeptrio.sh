@@ -26,4 +26,4 @@ singularity exec --cleanenv \
                 --output_gvcf_parent2 ${snakemake_output[mom_gvcf]} \
                 --ref ${snakemake_input[ref]} \
                 --regions ${snakemake_wildcards[CHROM]} \
-                --make_examples_extra_args "vsc_min_fraction_indels=0.5,vsc_min_count_indels=10,min_mapping_quality=1"
+                --make_examples_extra_args "select_variant_types='snps',min_mapping_quality=1"

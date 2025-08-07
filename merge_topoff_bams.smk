@@ -46,7 +46,8 @@ CHROMS = list(map(str, range(1, 23)))
 CHROMS = [f"chr{c}" for c in CHROMS]
 CHROMS.extend(["chrX", "chrY"])
 
-CHILDREN = ["2211"]
+# CHILDREN = ["2211"]
+# ALL_SAMPLES = ["2211", "2209", "2188"]
 
 def get_raw_ccs_bams(wildcards):
     seqruns = SMP2SEQRUNS[wildcards.SAMPLE]
@@ -83,7 +84,7 @@ wildcard_constraints:
 
 rule all:
     input:
-        dnms = expand("csv/{SAMPLE}.{ASSEMBLY}.trgt-denovo.csv", SAMPLE=CHILDREN, ASSEMBLY=["CHM13v2"]),
+        dnms = expand("csv/{CHROM}.{SAMPLE}.{ASSEMBLY}.trgt-denovo.csv", CHROM=CHROMS, SAMPLE=CHILDREN, ASSEMBLY=["CHM13v2"]),
         vcf = expand("data/trgt/{SAMPLE}.{ASSEMBLY}.phased.vcf.gz", SAMPLE=ALL_SAMPLES, ASSEMBLY=["CHM13v2"]),
         trio_vcf = expand("data/vcf/trios/merged/{SAMPLE}.{ASSEMBLY}.vcf.gz.tbi", SAMPLE=CHILDREN, ASSEMBLY=["CHM13v2"]),
         phased_snv = expand("data/vcf/snv/{SAMPLE}.{ASSEMBLY}.phased.vcf.gz", SAMPLE=CHILDREN, ASSEMBLY=["CHM13v2"])
@@ -157,38 +158,53 @@ rule create_chrom_bed:
 
 rule run_trgt:
     input:
-        bam = lambda wildcards: get_complete_bams(wildcards),
-        bam_idx = lambda wildcards: get_complete_bams(wildcards) + ".bai",
+        bam = lambda wildcards: get_complete_bams(wildcards, wildcards.SAMPLE),
+        bam_idx = lambda wildcards: get_complete_bams(wildcards, wildcards.SAMPLE) + ".bai",
         reference = REF_FH,
-        trgt_binary = "/uufs/chpc.utah.edu/common/HIPAA/u1006375/src/trgt-v3.0.0-x86_64-unknown-linux-gnu/trgt",
+        trgt_binary = "/uufs/chpc.utah.edu/common/HIPAA/u1006375/src/trgt-v4.0.0-x86_64-unknown-linux-gnu/trgt",
         repeats = "data/catalogs/{CHROM}.{ASSEMBLY}.catalog.bed.gz"
     output:
         vcf = temp("data/trgt/per-chrom/{CHROM}.{SAMPLE}.{ASSEMBLY}.vcf.gz"),
         bam = temp("data/trgt/per-chrom/{CHROM}.{SAMPLE}.{ASSEMBLY}.spanning.bam")
-    threads: 8
+    threads: 16
     resources:
-        mem_mb = 32_000
+        mem_mb = 64_000
     shell:
         """
-        {input.trgt_binary} genotype --threads 8 \
+        {input.trgt_binary} genotype --threads {threads} \
                             --genome {input.reference} \
                             --repeats {input.repeats} \
                             --reads {input.bam} \
-                            --output-prefix "data/trgt/per-chrom/{wildcards.CHROM}.{wildcards.SAMPLE}.{wildcards.ASSEMBLY}"
+                            --output-prefix "data/trgt/per-chrom/{wildcards.CHROM}.{wildcards.SAMPLE}.{wildcards.ASSEMBLY}" \
+                            -vvv
         """
 
-rule merge_trgt_bams:
-    input:
-        bams = expand("data/trgt/per-chrom/{CHROM}.{{SAMPLE}}.{{ASSEMBLY}}.spanning.bam", CHROM=CHROMS)
+
+rule sort_chrom_vcfs:
+    input: "data/trgt/per-chrom/{CHROM}.{SAMPLE}.{ASSEMBLY}.vcf.gz"
     output:
-        temp("data/trgt/{SAMPLE}.{ASSEMBLY}.spanning.bam")
-    threads: 8
+        vcf = temp("data/trgt/per-chrom/{CHROM}.{SAMPLE}.{ASSEMBLY}.sorted.vcf.gz"),
+        idx = temp("data/trgt/per-chrom/{CHROM}.{SAMPLE}.{ASSEMBLY}.sorted.vcf.gz.tbi")
     shell:
         """
-        module load samtools
+        module load bcftools
         
-        samtools merge -O BAM -o {output} -@ {threads} {input.bams}
+        bcftools sort -Ob -o {output.vcf} {input}
+        bcftools index --tbi {output.vcf}
         """
+
+# rule merge_trgt_bams:
+#     input:
+#         bams = expand("data/trgt/per-chrom/{CHROM}.{{SAMPLE}}.{{ASSEMBLY}}.spanning.bam", CHROM=CHROMS)
+#     output:
+#         temp("data/trgt/{SAMPLE}.{ASSEMBLY}.spanning.bam")
+#     threads: 8
+#     shell:
+#         """
+#         module load samtools
+        
+#         samtools merge -O BAM -o {output} -@ {threads} {input.bams}
+#         """
 
 
 rule merge_trgt_vcfs:
@@ -206,8 +222,8 @@ rule merge_trgt_vcfs:
 
 
 rule sort_bam:
-    input: "data/trgt/{SAMPLE}.{ASSEMBLY}.spanning.bam"
-    output: "data/trgt/{SAMPLE}.{ASSEMBLY}.spanning.sorted.bam"    
+    input: "data/trgt/per-chrom/{CHROM}.{SAMPLE}.{ASSEMBLY}.spanning.bam"
+    output: temp("data/trgt/per-chrom/{CHROM}.{SAMPLE}.{ASSEMBLY}.spanning.sorted.bam")
     shell:
         """
         module load samtools
@@ -284,15 +300,16 @@ rule call_trio_snvs:
         dad_gvcf = "data/vcf/snv/per-chrom/{SAMPLE}.dad.{ASSEMBLY}.{CHROM}.g.vcf.gz",
         mom_vcf = "data/vcf/snv/per-chrom/{SAMPLE}.mom.{ASSEMBLY}.{CHROM}.vcf.gz",
         mom_gvcf = "data/vcf/snv/per-chrom/{SAMPLE}.mom.{ASSEMBLY}.{CHROM}.g.vcf.gz",
-    threads: 8
+    threads: 16
     params:
         kid_name = lambda wildcards: SMP2ALT[wildcards.SAMPLE],
         dad_name = lambda wildcards: SMP2ALT[SMP2DAD[wildcards.SAMPLE]],
         mom_name = lambda wildcards: SMP2ALT[SMP2MOM[wildcards.SAMPLE]],
     resources:
         mem_mb = 64_000,
-        slurm_account = "quinlan-rw",
-        slurm_partition = "quinlan-rw",
+        slurm_account = "ucgd-rw",
+        slurm_partition = "ucgd-shared-rw",
+        runtime = 1440,
     script:
         "scripts/run_deeptrio.sh"
 
@@ -393,6 +410,7 @@ rule merge_trio_vcfs:
         bcftools concat {input.vcfs} | bcftools view --threads {threads} -t ^chrEBV,phix | grep -v 'ID=chrEB\|ID=phix' | bgzip > {output}
         """
 
+
 rule index_merged_vcf:
     input:
         "data/vcf/trios/merged/{SAMPLE}.{ASSEMBLY}.vcf.gz"
@@ -411,22 +429,22 @@ rule run_trgt_denovo:
         reference = REF_FH,
         repeats = "data/catalogs/chm13v2.0_maskedY_rCRS.palladium-v1.0.trgt.bed",
         trgt_denovo_binary = "/uufs/chpc.utah.edu/common/HIPAA/u1006375/bin/trgt-denovo",
-        kid_vcf = "data/trgt/{SAMPLE}.{ASSEMBLY}.sorted.vcf.gz",
-        mom_vcf = lambda wildcards: "data/trgt/" + SMP2MOM[wildcards.SAMPLE] + "." + wildcards.ASSEMBLY + ".sorted.vcf.gz",
-        dad_vcf = lambda wildcards: "data/trgt/" + SMP2DAD[wildcards.SAMPLE] + "." + wildcards.ASSEMBLY + ".sorted.vcf.gz",
-        kid_bam = "data/trgt/{SAMPLE}.{ASSEMBLY}.spanning.sorted.bam",
-        mom_bam = lambda wildcards: "data/trgt/" + SMP2MOM[wildcards.SAMPLE] + "." + wildcards.ASSEMBLY + ".spanning.sorted.bam",
-        dad_bam = lambda wildcards: "data/trgt/" + SMP2DAD[wildcards.SAMPLE] + "." + wildcards.ASSEMBLY + ".spanning.sorted.bam",
+        kid_vcf = "data/trgt/per-chrom/{CHROM}.{SAMPLE}.{ASSEMBLY}.sorted.vcf.gz",
+        mom_vcf = lambda wildcards: "data/trgt/per-chrom/" + wildcards.CHROM + "." + SMP2MOM[wildcards.SAMPLE] + "." + wildcards.ASSEMBLY + ".sorted.vcf.gz",
+        dad_vcf = lambda wildcards: "data/trgt/per-chrom/" + wildcards.CHROM + "." + SMP2DAD[wildcards.SAMPLE] + "." + wildcards.ASSEMBLY + ".sorted.vcf.gz",
+        kid_bam = "data/trgt/per-chrom/{CHROM}.{SAMPLE}.{ASSEMBLY}.spanning.sorted.bam",
+        mom_bam = lambda wildcards: "data/trgt/per-chrom/" + wildcards.CHROM + "." + SMP2MOM[wildcards.SAMPLE] + "." + wildcards.ASSEMBLY + ".spanning.sorted.bam",
+        dad_bam = lambda wildcards: "data/trgt/per-chrom/" + wildcards.CHROM + "." + SMP2DAD[wildcards.SAMPLE] + "." + wildcards.ASSEMBLY + ".spanning.sorted.bam",
     output:
-        output = "csv/{SAMPLE}.{ASSEMBLY}.trgt-denovo.csv"
-    threads: 32
+        output = "csv/{CHROM}.{SAMPLE}.{ASSEMBLY}.trgt-denovo.csv"
+    threads: 16
     resources:
         mem_mb = 64_000,
-        runtime = 1_920
+        runtime = 1_440
     params:
-        kid_pref = lambda wildcards: f"data/trgt/{wildcards.SAMPLE}.{wildcards.ASSEMBLY}",
-        mom_pref = lambda wildcards: f"data/trgt/{SMP2MOM[wildcards.SAMPLE]}.{wildcards.ASSEMBLY}",
-        dad_pref = lambda wildcards: f"data/trgt/{SMP2DAD[wildcards.SAMPLE]}.{wildcards.ASSEMBLY}",
+        kid_pref = lambda wildcards: f"data/trgt/per-chrom/{wildcards.CHROM}.{wildcards.SAMPLE}.{wildcards.ASSEMBLY}",
+        mom_pref = lambda wildcards: f"data/trgt/per-chrom/{wildcards.CHROM}.{SMP2MOM[wildcards.SAMPLE]}.{wildcards.ASSEMBLY}",
+        dad_pref = lambda wildcards: f"data/trgt/per-chrom/{wildcards.CHROM}.{SMP2DAD[wildcards.SAMPLE]}.{wildcards.ASSEMBLY}",
     shell:
         """
         {input.trgt_denovo_binary} trio --reference {input.reference} \
