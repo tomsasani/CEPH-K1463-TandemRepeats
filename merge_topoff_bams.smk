@@ -77,6 +77,9 @@ ALL_SAMPLES = ped["sample_id"].unique()
 CHILDREN = ped[ped["paternal_id"] != "missing"]["sample_id"].to_list()
 VERSIONS = ["v4.0"]
 
+# CHILDREN = ["200084"]
+# ALL_SAMPLES = CHILDREN + ["2216", "200080"]
+
 rule all:
     input:
         dnms = expand("csv/{SAMPLE}.{ASSEMBLY}.{VERSION}.{CHROM}.trgt-denovo.csv", CHROM=CHROMS, SAMPLE=CHILDREN, ASSEMBLY=["CHM13v2"], VERSION=VERSIONS),
@@ -163,7 +166,7 @@ rule run_trgt:
         bam = "data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.{VERSION}.{CHROM}.spanning.bam"
     params:
         genotype_cmd = lambda wildcards: "" if wildcards.VERSION == "v0.7" else "genotype",
-        karyotype_cmd = lambda wildcards: "" if wildcards.VERSION == "v4.0" else "--karyotype XX" if SMP2SEX[wildcards.SAMPLE] == "female" else "--karyotype XY"
+        karyotype_cmd = lambda wildcards: "--karyotype XY" if SMP2SEX[wildcards.SAMPLE] == "male" and wildcards.CHROM in ("chrX", "chrY") else ""
     threads: 16
     resources:
         mem_mb = 64_000
