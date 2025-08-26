@@ -4,9 +4,10 @@ import pandas as pd
 
 
 ASSEMBLY2CATALOG = {"GRCh38": "/scratch/ucgd/lustre-labs/quinlan/data-shared/datasets/Palladium/TRGT/from_aws/staging/catalogs/human_GRCh38_no_alt_analysis_set.palladium-v1.0.trgt.bed.gz",
-                   "CHM13v2": "/scratch/ucgd/lustre-labs/quinlan/data-shared/datasets/Palladium/TRGT/from_aws/staging/catalogs/chm13v2.0_maskedY_rCRS.palladium-v1.0.trgt.bed.gz"}
+                    "CHM13v2": "/scratch/ucgd/lustre-labs/quinlan/data-shared/datasets/Palladium/TRGT/from_aws/staging/catalogs/chm13v2.0_maskedY_rCRS.palladium-v1.0.trgt.bed.gz"}
 
-REF_FH = "/scratch/ucgd/lustre/common/data/Reference/homo_sapiens/CHM13v2.0/primary_assembly_decoy_phix.fa"
+ASSEMBLY2REF = {"GRCh38": "/scratch/ucgd/lustre/common/data/Reference/homo_sapiens/GRCh38/primary_assembly_decoy_phix.fa", 
+                "CHM13v2": "/scratch/ucgd/lustre/common/data/Reference/homo_sapiens/CHM13v2.0/primary_assembly_decoy_phix.fa"}
 
 # create global dictionaries we'll use
 PED_FILE = "tr_validation/data/file_mapping.csv"
@@ -20,7 +21,7 @@ SMP2SEX = dict(zip(ped["sample_id"], ped["sex"]))
 # map sample names to ALT (Coriell) IDs, suffixes, and parents
 SMP2ALT = dict(zip(ped["sample_id"], ped["alt_sample_id"]))
 
-ORIG_PATH = "/scratch/ucgd/lustre-labs/quinlan/data-shared/datasets/Palladium/hifi-bams/CHM13"
+ORIG_PATH = "/scratch/ucgd/lustre-labs/quinlan/data-shared/datasets/Palladium/hifi-bams"
 NEW_PATH = "/scratch/ucgd/lustre-labs/quinlan/data-shared/datasets/Palladium/UW_PB_HiFi/topoff_2025"
 
 # map samples to list of sub-bams
@@ -33,18 +34,19 @@ for fh in glob.glob(f"{NEW_PATH}/K**/*.bam"):
     SMP2SEQRUNS[sample].append(seqrun)
     SMP2BCIDS[sample].append(bcid)
 
-# add orig
-smp2orig = {}
-for sample in ("200080", "200100", "2189", "2216"):
-    smp2orig[sample] = f"{ORIG_PATH}/{SMP2ALT[sample]}.chm13.haplotagged.bam"
 
+def get_orig_sample_bam(wildcards):
+    assembly_adj = wildcards.ASSEMBLY.lower().rstrip("v2") if wildcards.ASSEMBLY == "CHM13v2" else wildcards.ASSEMBLY
+    
+    return f"{ORIG_PATH}/{wildcards.ASSEMBLY}/{SMP2ALT[wildcards.SAMPLE]}.{assembly_adj}.haplotagged.bam"
+    
 
 def get_raw_ccs_bams(wildcards):
     seqruns = SMP2SEQRUNS[wildcards.SAMPLE]
     bcids = SMP2BCIDS[wildcards.SAMPLE]
     o = []
     for s,b in zip(seqruns, bcids):
-        o.append(f"data/bam/raw/{wildcards.SAMPLE}.{s}.{b}.sorted.bam")
+        o.append(f"data/bam/raw/{wildcards.ASSEMBLY}/{wildcards.SAMPLE}.{s}.{b}.sorted.bam")
     return o
 
 
@@ -56,7 +58,7 @@ def get_complete_bams(wildcards, sample):
     return the original path to the HiFi BAM
     """
     if sample in ("200100", "2189", "2216", "200080"):
-        return NEW_PATH + f"/merged/{sample}.merged.bam"
+        return NEW_PATH + f"/merged/{wildcards.ASSEMBLY}/{sample}.merged.bam"
     else:
         assembly_adj = wildcards.ASSEMBLY.split('v2')[0]
         sample_id = SMP2ALT[sample]
@@ -65,7 +67,7 @@ def get_complete_bams(wildcards, sample):
 
 wildcard_constraints:
     SAMPLE = "[0-9]+",
-    ASSEMBLY = "CHM13v2",
+    ASSEMBLY = "CHM13v2|GRCh38",
     CHROM = "chr[0-9]{1,2}|chrX|chrY",
     VERSION = "v[0-9].[0-9]"
 
@@ -76,25 +78,25 @@ CHROMS.extend(["chrX", "chrY"])
 ALL_SAMPLES = ped["sample_id"].unique()
 CHILDREN = ped[ped["paternal_id"] != "missing"]["sample_id"].to_list()
 VERSIONS = ["v4.0"]
+ASSEMBLIES = ["GRCh38", "CHM13v2"]
+CHILDREN = ["200084"]
 
-# CHILDREN = ["200084"]
-# ALL_SAMPLES = CHILDREN + ["2216", "200080"]
 
 rule all:
     input:
-        dnms = expand("csv/{SAMPLE}.{ASSEMBLY}.{VERSION}.{CHROM}.trgt-denovo.csv", CHROM=CHROMS, SAMPLE=CHILDREN, ASSEMBLY=["CHM13v2"], VERSION=VERSIONS),
-        phased_trgt = expand("data/trgt/phased/{SAMPLE}.{ASSEMBLY}.{VERSION}.phased.vcf.gz.tbi", SAMPLE=ALL_SAMPLES, ASSEMBLY=["CHM13v2"], VERSION=VERSIONS),
-        trio_vcf = expand("data/vcf/trios/merged/{SAMPLE}.{ASSEMBLY}.vcf.gz.tbi", SAMPLE=CHILDREN, ASSEMBLY=["CHM13v2"]),
-        phased_snv = expand("data/vcf/snv/phased/{SAMPLE}.{ASSEMBLY}.{VERSION}.phased.vcf.gz.tbi", SAMPLE=ALL_SAMPLES, ASSEMBLY=["CHM13v2"], VERSION=VERSIONS)
+        dnms = expand("csv/{SAMPLE}.{ASSEMBLY}.{VERSION}.{CHROM}.trgt-denovo.csv", CHROM=CHROMS, SAMPLE=CHILDREN, ASSEMBLY=ASSEMBLIES, VERSION=VERSIONS),
+        phased_trgt = expand("data/trgt/phased/{SAMPLE}.{ASSEMBLY}.{VERSION}.phased.vcf.gz.tbi", SAMPLE=ALL_SAMPLES, ASSEMBLY=ASSEMBLIES, VERSION=VERSIONS),
+        trio_vcf = expand("data/vcf/trios/merged/{SAMPLE}.{ASSEMBLY}.vcf.gz.tbi", SAMPLE=CHILDREN, ASSEMBLY=ASSEMBLIES),
+        phased_snv = expand("data/vcf/snv/phased/{SAMPLE}.{ASSEMBLY}.{VERSION}.phased.vcf.gz.tbi", SAMPLE=ALL_SAMPLES, ASSEMBLY=ASSEMBLIES, VERSION=VERSIONS)
 
 
 rule align_ccs_bam:
     input:
-        ref = REF_FH,
+        ref = lambda wildcards: ASSEMBLY2REF[wildcards.ASSEMBLY],
         bam = NEW_PATH + "/K1463_{SAMPLE}/{SEQRUN}.hifi_reads.{BCID}.bam"
     output:
-        bam = "data/bam/raw/{SAMPLE}.{SEQRUN}.{BCID}.sorted.bam",
-        bai = "data/bam/raw/{SAMPLE}.{SEQRUN}.{BCID}.sorted.bam.bai",
+        bam = "data/bam/raw/{ASSEMBLY}/{SAMPLE}.{SEQRUN}.{BCID}.sorted.bam",
+        bai = "data/bam/raw/{ASSEMBLY}/{SAMPLE}.{SEQRUN}.{BCID}.sorted.bam.bai",
     threads: 8
     params:
         alt_sample_id = lambda wildcards: SMP2ALT[wildcards.SAMPLE]
@@ -119,9 +121,9 @@ rule align_ccs_bam:
 rule combine_sample_bams:
     input:
         new_bams = lambda wildcards: get_raw_ccs_bams(wildcards),
-        old_bam = lambda wildcards: smp2orig[wildcards.SAMPLE]
+        old_bam = lambda wildcards: get_orig_sample_bam(wildcards)
     output:
-        bam_fh = NEW_PATH + "/merged/{SAMPLE}.merged.bam",
+        bam_fh = NEW_PATH + "/merged/{ASSEMBLY}/{SAMPLE}.merged.bam",
     threads: 8
     shell:
         """
@@ -130,11 +132,12 @@ rule combine_sample_bams:
         samtools merge --threads {threads} -O BAM -o {output.bam_fh} {input.new_bams} {input.old_bam}
         """
 
+
 rule index_sample_bams:
     input:
-        bam_fh = NEW_PATH + "/merged/{SAMPLE}.merged.bam"
+        bam_fh = NEW_PATH + "/merged/{ASSEMBLY}/{SAMPLE}.merged.bam"
     output:
-        bam_idx = NEW_PATH + "/merged/{SAMPLE}.merged.bam.bai",
+        bam_idx = NEW_PATH + "/merged/{ASSEMBLY}/{SAMPLE}.merged.bam.bai",
     threads: 4
     shell:
         """
@@ -142,6 +145,7 @@ rule index_sample_bams:
         
         samtools index -@ {threads} {input.bam_fh}
         """
+
 
 rule create_chrom_bed:
     input:
@@ -154,11 +158,35 @@ rule create_chrom_bed:
         """
 
 
+rule create_chrom_ref:
+    input:
+        reference = lambda wildcards: ASSEMBLY2REF[wildcards.ASSEMBLY],
+    output: contig = "data/contigs/{CHROM}.{ASSEMBLY}.fa.gz"
+    shell:
+        """
+        module load samtools
+        
+        samtools faidx {input.reference} {wildcards.CHROM} | bgzip > {output.contig}
+        """
+
+rule index_chrom_ref:
+    input:
+        contig = "data/contigs/{CHROM}.{ASSEMBLY}.fa.gz"
+    output: idx = "data/contigs/{CHROM}.{ASSEMBLY}.fa.gz.fai"
+    shell:
+        """
+        module load samtools
+        
+        samtools faidx {input.contig}
+        """
+
+
+
 rule run_trgt:
     input:
         bam = lambda wildcards: get_complete_bams(wildcards, wildcards.SAMPLE),
         bam_idx = lambda wildcards: get_complete_bams(wildcards, wildcards.SAMPLE) + ".bai",
-        reference = REF_FH,
+        reference = "data/contigs/{CHROM}.{ASSEMBLY}.fa.gz",
         trgt_binary = lambda wildcards: "/uufs/chpc.utah.edu/common/HIPAA/u1006375/src/trgt-v4.0.0-x86_64-unknown-linux-gnu/trgt" if wildcards.VERSION == "v4.0" else "/uufs/chpc.utah.edu/common/HIPAA/u1006375/src/trgt-v0.7.0-linux_x86_64",
         repeats = "data/catalogs/{CHROM}.{ASSEMBLY}.catalog.bed"
     output:
@@ -183,16 +211,16 @@ rule run_trgt:
 
 
 rule sort_chrom_vcfs:
-    input: "data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.{VERSION}.{CHROM}.vcf.gz"
+    input: 
+        vcf = "data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.{VERSION}.{CHROM}.vcf.gz",
     output:
         vcf = "data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.{VERSION}.{CHROM}.sorted.vcf.gz",
         idx = "data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.{VERSION}.{CHROM}.sorted.vcf.gz.tbi"
     shell:
         """
         module load bcftools
-        bcftools view -t ^chrEBV,phix {input} | grep -v 'ID=chrEB\|ID=phix' | \
+        bcftools view -t {wildcards.CHROM} {input.vcf} | grep 'fileformat\|FILTER\|INFO\|FORMAT\|trgt\|bcftools\|{wildcards.CHROM},\|^{wildcards.CHROM}' | \
         bcftools sort -Ob -o {output.vcf}
-
         bcftools index --tbi {output.vcf}
         """
 
@@ -211,7 +239,8 @@ rule sort_bam:
 # https://github.com/PacificBiosciences/wdl-common/blob/2ae390d4ed6b80dd2a2ef10c960832ffa8c7d1d3/wdl/workflows/deepvariant/deepvariant.wdl
 rule call_snvs:
     input:
-        ref = REF_FH,
+        ref = "data/contigs/{CHROM}.{ASSEMBLY}.fa.gz",
+        ref_idx = "data/contigs/{CHROM}.{ASSEMBLY}.fa.gz.fai",
         bam = lambda wildcards: get_complete_bams(wildcards, wildcards.SAMPLE),
         bam_idx = lambda wildcards: get_complete_bams(wildcards, wildcards.SAMPLE) + ".bai",
         sif = "deepvariant_1.9.0.sif"
@@ -259,15 +288,15 @@ rule call_snvs:
 
 
 rule sort_snv_chrom_vcfs:
-    input: "data/vcf/snv/per-chrom/{SAMPLE}.{ASSEMBLY}.{CHROM}.vcf.gz"
+    input: 
+        vcf = "data/vcf/snv/per-chrom/{SAMPLE}.{ASSEMBLY}.{CHROM}.vcf.gz",
     output: "data/vcf/snv/per-chrom/{SAMPLE}.{ASSEMBLY}.{CHROM}.sorted.vcf.gz"
     threads: 4
     shell:
         """
         module load bcftools
 
-        bcftools view -t ^chrEBV,phix {input} | grep -v 'ID=chrEB\|ID=phix' | \
-        bcftools sort -Ob -o {output}
+        bcftools sort -Ob -o {output} {input.vcf}
         """
 
 
@@ -292,7 +321,7 @@ rule run_hiphase:
         str_vcf_idx = "data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.{VERSION}.{CHROM}.sorted.vcf.gz.tbi",
         bam = lambda wildcards: get_complete_bams(wildcards, wildcards.SAMPLE),
         bam_idx = lambda wildcards: get_complete_bams(wildcards, wildcards.SAMPLE) + ".bai",
-        reference = REF_FH
+        reference = "data/contigs/{CHROM}.{ASSEMBLY}.fa.gz",
     output:
         snv_vcf = "data/vcf/snv/per-chrom/{SAMPLE}.{ASSEMBLY}.{VERSION}.{CHROM}.phased.vcf.gz",
         str_vcf = "data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.{VERSION}.{CHROM}.phased.vcf.gz",
@@ -320,7 +349,7 @@ rule combine_phased_snv_vcfs:
         """
         module load bcftools
         
-        bcftools concat {input.vcfs} | bcftools view --threads {threads} -f 'PASS' -t ^chrEBV,phix | grep -v 'ID=chrEB\|ID=phix' | bgzip > {output}
+        bcftools concat {input.vcfs} | bcftools view --threads {threads} -f 'PASS' | bgzip > {output}
         """
 
 rule index_phased_snv_vcfs:
@@ -343,7 +372,7 @@ rule combine_phased_trgt_vcfs:
         """
         module load bcftools
         
-        bcftools concat {input.vcfs} | bcftools view --threads {threads} -t ^chrEBV,phix | grep -v 'ID=chrEB\|ID=phix' | bgzip > {output}
+        bcftools concat {input.vcfs} | bcftools view --threads {threads} | bgzip > {output}
         """
 
 rule index_phased_trgt_vcfs:
@@ -395,7 +424,7 @@ rule merge_trio_vcfs:
         """
         module load bcftools
         
-        bcftools concat {input.vcfs} | bcftools view --threads {threads} -t ^chrEBV,phix | grep -v 'ID=chrEB\|ID=phix' | bgzip > {output}
+        bcftools concat {input.vcfs} | bcftools view --threads {threads} | bgzip > {output}
         """
 
 
@@ -423,7 +452,7 @@ rule create_chrom_definitions:
 
 rule run_trgt_denovo:
     input:
-        reference = REF_FH,
+        reference = "data/contigs/{CHROM}.{ASSEMBLY}.fa.gz",
         repeats =  "data/catalogs/per-chrom/{CHROM}.CHM13v2.trgt.bed",
         trgt_denovo_binary = "/uufs/chpc.utah.edu/common/HIPAA/u1006375/bin/trgt-denovo",
         kid_vcf = "data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.{VERSION}.{CHROM}.sorted.vcf.gz",
