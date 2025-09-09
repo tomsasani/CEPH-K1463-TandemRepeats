@@ -14,7 +14,7 @@ def main(args):
     # lenient minimum, use (almost) all of their reads.
     if frac > 1: frac = 0.99
     
-    base_cmd = f"sambamba view --subsampling-seed 42 -f bam -L {args.bed} -t {args.nthreads} "
+    base_cmd = f"sambamba view --subsampling-seed 42 -f bam -t {args.nthreads} "
     # kid_cmd = base_cmd + f"{args.kid_input_bam} -o {args.kid_output_bam}"
 
     # if we want to downsample everyone to be the same constant depth
@@ -25,7 +25,6 @@ def main(args):
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--depth")
-    p.add_argument("--bed")
     p.add_argument("--input_bam")
     p.add_argument("--output_bam")
     p.add_argument("-nthreads", default=8)

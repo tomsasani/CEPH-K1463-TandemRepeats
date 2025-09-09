@@ -1,0 +1,101 @@
+from pandera.pandas import Column, Check, DataFrameSchema
+
+
+BaseSchema = DataFrameSchema(
+    {
+        "sample_id": Column(str, required=True),
+        "trid": Column(str, required=True),
+        "index": Column(int, Check.isin([0, 1]), required=True),
+    }
+)
+
+ValidationSchema = DataFrameSchema(
+    {
+        "trid": Column(str, required=True),
+        "index": Column(int, Check.isin([0, 1]), required=True),
+        "#chrom": Column(str, required=True),
+        "start": Column(int, required=True),
+        "end": Column(int, required=True),
+        "child_AL": Column(str, required=True),
+    }
+)
+
+
+TRGTDeNovoSchema = BaseSchema.add_columns(
+    {
+        "genotype": Column(int, Check.isin([0, 1, 2]), required=True),
+        "denovo_coverage": Column(int, required=True),
+        "child_ratio": Column(float, required=True),
+        "per_allele_reads_father": Column(str, required=True, nullable=False, coerce=True),
+        "per_allele_reads_mother": Column(str, required=True, nullable=False, coerce=True),
+        "child_coverage": Column(int, required=True),
+        "father_overlap_coverage": Column(str, required=True, nullable=False, coerce=True),
+        "mother_overlap_coverage": Column(str, required=True, nullable=False, coerce=True),
+        "child_AL": Column(str, required=True, nullable=False),
+        "father_AL": Column(str, required=True, nullable=False),
+        "mother_AL": Column(str, required=True, nullable=False),
+    }
+)
+
+
+TransmissionSchema = BaseSchema.add_columns(
+    {
+        "children_with_denovo_allele": Column(str, required=True, nullable=True),
+    }
+)
+
+
+OrthogonalSchema = TRGTDeNovoSchema.add_columns(
+    {
+        "kid_evidence": Column(str, required=True),
+        "mom_evidence": Column(str, required=True),
+        "dad_evidence": Column(str, required=True),
+        "exp_allele_diff_denovo": Column(int, required=True),
+        "exp_allele_diff_non_denovo": Column(int, required=True),
+    }
+)
+
+
+InformativeSiteSchema = TRGTDeNovoSchema.add_columns(
+    {
+        "inf_chrom": Column(str, required=True),
+        "inf_pos": Column(int, required=True, coerce=True),
+        "dad_inf_gt": Column(float, required=True),
+        "mom_inf_gt": Column(float, required=True),
+        "str_parent_of_origin": Column(str, required=True),
+        "abs_diff_to_str": Column(float, required=True, nullable=True),
+    }
+)
+
+
+HaplotypedSchema = InformativeSiteSchema.add_columns(
+    {
+        "haplotype_in_parent": Column(str, required=True),
+    }
+)
+
+
+PhasedSchema = TRGTDeNovoSchema.add_columns(
+    {
+        "phase_consensus": Column(
+            str,
+            # Check(lambda p: ":" in p, element_wise=True),
+            required=True,
+        ),
+        "haplotype_in_parent_consensus": Column(
+            str,
+            required=True,
+        ),
+    }
+)
+
+MergedSchema = PhasedSchema.add_columns(
+    {
+        "denovo_allele_sequence": Column(str, required=True),
+        "precursor_allele_length_in_parent": Column(float, required=True),
+        "precursor_sequence_in_parent": Column(str, required=True),
+        "untransmitted_sequence_in_parent": Column(str, required=True),
+        "precursor_AP": Column(float, required=True),
+        "untransmitted_AP": Column(float, required=True),
+    }
+)

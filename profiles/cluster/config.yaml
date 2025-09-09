@@ -1,0 +1,20 @@
+# RE-RUN BEHAVIOR
+rerun-incomplete: true
+keep-going: true
+
+retries: 0
+
+# CLUSTER BEHAVIOR
+executor: slurm
+jobs: 96
+
+# resources:
+#   threads: 32
+#   mem_mb: 64000
+#   disk_mb: 32000
+
+default-resources:
+  slurm_account: "ucgd-rw"
+  slurm_partition: "ucgd-shared-rw"
+  runtime: 720
+  mem_mb: 8000
