@@ -3,7 +3,6 @@ from typing import Dict
 
 
 CHROMS = [f"chr{c}" for c in range(1, 23)] + ["chrX"]
-# CHROMS = ["chr1"]
 
 PED_FILE = "tr_validation/data/file_mapping.csv"
 ped = pd.read_csv(PED_FILE, sep=",", dtype={"paternal_id": str, "maternal_id": str, "sample_id": str,})
@@ -38,6 +37,25 @@ def get_annotation_fh(wildcards):
     elif wildcards.ASSEMBLY == "CHM13v2":
         return "/scratch/ucgd/lustre-labs/quinlan/data-shared/datasets/Palladium/TRGT/from_aws/staging/catalogs/chm13v2.0_maskedY_rCRS.palladium-v1.0.trgt.annotations.bed.gz"
 
+def get_children_vcfs(wildcards):
+    if wildcards.SAMPLE == "2216":
+        children = ["200081", "200082", "200084", "200085", "200086", "200087"]
+    elif wildcards.SAMPLE == "2189":
+        children = ["200101", "200102", "200103", "200104", "200105", "200106"]
+    else:
+        children = []
+    
+    return [f"data/trgt/phased/{s}.{wildcards.ASSEMBLY}.v4.0.phased.vcf.gz" for s in children]
+
+def get_grandparent_vcfs(wildcards):
+    if wildcards.SAMPLE.startswith("200"):
+        grandparents = ["2209", "2188"]
+    else:
+        grandparents = ["2281", "2280", "2213", "2214"]
+        
+    return [f"data/trgt/phased/{s}.{wildcards.ASSEMBLY}.v4.0.phased.vcf.gz" for s in grandparents]
+
+
 
 wildcard_constraints:
     SAMPLE = "[0-9]+",
@@ -46,13 +64,16 @@ wildcard_constraints:
 
 ORIG_PATH = "/scratch/ucgd/lustre-labs/quinlan/data-shared/datasets/Palladium/hifi-bams"
 
-KID_TARGETS = [50] * 4
-DAD_TARGETS = [10, 30, 50, 50]
-MOM_TARGETS = [50, 50, 10, 30]
+KID_TARGETS = [50] * 9
+DAD_TARGETS = [10, 20, 30, 40, 50, 50, 50, 50, 50]
+MOM_TARGETS = [50, 50, 50, 50, 10, 20, 30, 40, 50]
+
 
 rule all:
     input:
-        expand("downsampling/csv/phasing/{SAMPLE}.{ASSEMBLY}.{KID_TARGET}.{MOM_TARGET}.{DAD_TARGET}.phased.2gen.tsv", zip, SAMPLE = ["2212"] * 4, ASSEMBLY = ["CHM13v2"] * 4, KID_TARGET=KID_TARGETS, MOM_TARGET=MOM_TARGETS, DAD_TARGET=DAD_TARGETS)
+        # expand("downsampling/csv/phasing/{SAMPLE}.{ASSEMBLY}.{KID_TARGET}.{MOM_TARGET}.{DAD_TARGET}.phased.2gen.tsv", zip, SAMPLE = ["2212"] * len(KID_TARGETS), ASSEMBLY = ["CHM13v2"] * len(KID_TARGETS), KID_TARGET=KID_TARGETS, MOM_TARGET=MOM_TARGETS, DAD_TARGET=DAD_TARGETS),
+        expand("downsampling/csv/filtered_and_merged/{SAMPLE}.{ASSEMBLY}.{KID_TARGET}.{MOM_TARGET}.{DAD_TARGET}.tsv", zip, SAMPLE = ["2212"] * len(KID_TARGETS), ASSEMBLY = ["CHM13v2"] * len(KID_TARGETS), KID_TARGET=KID_TARGETS, MOM_TARGET=MOM_TARGETS, DAD_TARGET=DAD_TARGETS)
+        # "downsampling/data/trgt/per-chrom/2212.CHM13v2.dad.10.chr21.spanning.bam"
 
 rule run_mosdepth:
     input:
@@ -195,8 +216,8 @@ rule run_trgt:
         trgt_binary = "/uufs/chpc.utah.edu/common/HIPAA/u1006375/src/trgt-v4.0.0-x86_64-unknown-linux-gnu/trgt",
         repeats = "data/catalogs/{CHROM}.{ASSEMBLY}.catalog.bed"
     output:
-        vcf = temp("downsampling/data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.{MEMBER}.{TARGET}.{CHROM}.vcf.gz"),
-        bam = temp("downsampling/data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.{MEMBER}.{TARGET}.{CHROM}.spanning.bam")
+        vcf = "downsampling/data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.{MEMBER}.{TARGET}.{CHROM}.vcf.gz",
+        bam = "downsampling/data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.{MEMBER}.{TARGET}.{CHROM}.spanning.bam"
     params:
         karyotype_cmd = lambda wildcards: get_karyotype_cmd(wildcards),
         output_prefix = lambda wildcards: f"downsampling/data/trgt/per-chrom/{wildcards.SAMPLE}.{wildcards.ASSEMBLY}.{wildcards.MEMBER}.{wildcards.TARGET}.{wildcards.CHROM}"
@@ -212,9 +233,15 @@ rule sort_chrom_vcfs:
         vcf = "downsampling/data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.{MEMBER}.{TARGET}.{CHROM}.vcf.gz",
     output:
         vcf = "downsampling/data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.{MEMBER}.{TARGET}.{CHROM}.sorted.vcf.gz",
-        idx = "downsampling/data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.{MEMBER}.{TARGET}.{CHROM}.sorted.vcf.gz.tbi"
     script:
         "bash_scripts/sort_trgt_vcf.sh"
+
+rule index_chrom_vcfs:
+    input: 
+        vcf = "downsampling/data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.{MEMBER}.{TARGET}.{CHROM}.sorted.vcf.gz",
+    output: "downsampling/data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.{MEMBER}.{TARGET}.{CHROM}.sorted.vcf.gz.tbi",
+    script:
+        "bash_scripts/index_snv_vcf.sh"
 
 
 rule sort_bam:
@@ -374,37 +401,45 @@ rule index_phased_trgt_vcfs:
         bcftools index --tbi {input}
         """
 
-
+CUR_PREF = "/scratch/ucgd/lustre-labs/quinlan/u1006375/CEPH-K1463-TandemRepeats/"
 rule run_trgt_denovo:
     input:
-        reference = "data/contigs/{CHROM}.{ASSEMBLY}.fa.gz",
-        repeats = "data/catalogs/{CHROM}.{ASSEMBLY}.catalog.bed",
+        reference = CUR_PREF + "data/contigs/{CHROM}.{ASSEMBLY}.fa.gz",
+        repeats = CUR_PREF + "data/catalogs/{CHROM}.{ASSEMBLY}.catalog.bed",
         trgt_denovo_binary = "/uufs/chpc.utah.edu/common/HIPAA/u1006375/bin/trgt-denovo",
-        kid_vcf = "downsampling/data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.kid.{KID_TARGET}.{CHROM}.sorted.vcf.gz",
-        mom_vcf = "downsampling/data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.mom.{MOM_TARGET}.{CHROM}.sorted.vcf.gz",
-        dad_vcf = "downsampling/data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.dad.{DAD_TARGET}.{CHROM}.sorted.vcf.gz",
-        kid_bam = "downsampling/data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.kid.{KID_TARGET}.{CHROM}.spanning.sorted.bam",
-        kid_bam_idx = "downsampling/data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.kid.{KID_TARGET}.{CHROM}.spanning.sorted.bam.bai",
-        mom_bam = "downsampling/data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.mom.{MOM_TARGET}.{CHROM}.spanning.sorted.bam",
-        mom_bam_idx = "downsampling/data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.mom.{MOM_TARGET}.{CHROM}.spanning.sorted.bam.bai",
-        dad_bam = "downsampling/data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.dad.{DAD_TARGET}.{CHROM}.spanning.sorted.bam",
-        dad_bam_idx = "downsampling/data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.dad.{DAD_TARGET}.{CHROM}.spanning.sorted.bam.bai",
-
+        kid_vcf = CUR_PREF + "downsampling/data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.kid.{KID_TARGET}.{CHROM}.sorted.vcf.gz",
+        kid_vcf_idx = CUR_PREF + "downsampling/data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.kid.{KID_TARGET}.{CHROM}.sorted.vcf.gz.tbi",
+        mom_vcf = CUR_PREF + "downsampling/data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.mom.{MOM_TARGET}.{CHROM}.sorted.vcf.gz",
+        mom_vcf_idx = CUR_PREF + "downsampling/data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.mom.{MOM_TARGET}.{CHROM}.sorted.vcf.gz.tbi",
+        dad_vcf = CUR_PREF + "downsampling/data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.dad.{DAD_TARGET}.{CHROM}.sorted.vcf.gz",
+        dad_vcf_idx = CUR_PREF + "downsampling/data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.dad.{DAD_TARGET}.{CHROM}.sorted.vcf.gz.tbi",
+        kid_bam = CUR_PREF + "downsampling/data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.kid.{KID_TARGET}.{CHROM}.spanning.sorted.bam",
+        kid_bam_idx = CUR_PREF + "downsampling/data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.kid.{KID_TARGET}.{CHROM}.spanning.sorted.bam.bai",
+        mom_bam = CUR_PREF + "downsampling/data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.mom.{MOM_TARGET}.{CHROM}.spanning.sorted.bam",
+        mom_bam_idx = CUR_PREF + "downsampling/data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.mom.{MOM_TARGET}.{CHROM}.spanning.sorted.bam.bai",
+        dad_bam = CUR_PREF + "downsampling/data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.dad.{DAD_TARGET}.{CHROM}.spanning.sorted.bam",
+        dad_bam_idx = CUR_PREF + "downsampling/data/trgt/per-chrom/{SAMPLE}.{ASSEMBLY}.dad.{DAD_TARGET}.{CHROM}.spanning.sorted.bam.bai",
     output:
-        output = "downsampling/csv/denovos/{SAMPLE}.{ASSEMBLY}.{KID_TARGET}.{MOM_TARGET}.{DAD_TARGET}.{CHROM}.denovo.csv"
-    threads: 8
+        output = CUR_PREF + "downsampling/csv/denovos/{SAMPLE}.{ASSEMBLY}.{KID_TARGET}.{MOM_TARGET}.{DAD_TARGET}.{CHROM}.denovo.csv"
+    threads: 32
+    resources:
+        mem_mb = 32_000,
+        runtime = 720,
+        slurm_account = "ucgd-rw",
+        slurm_partition = "ucgd-rw"
     params:
-        kid_pref = lambda wildcards: f"downsampling/data/trgt/per-chrom/{wildcards.SAMPLE}.{wildcards.ASSEMBLY}.kid.{wildcards.KID_TARGET}.{wildcards.CHROM}",
-        mom_pref = lambda wildcards: f"downsampling/data/trgt/per-chrom/{wildcards.SAMPLE}.{wildcards.ASSEMBLY}.mom.{wildcards.MOM_TARGET}.{wildcards.CHROM}",
-        dad_pref = lambda wildcards: f"downsampling/data/trgt/per-chrom/{wildcards.SAMPLE}.{wildcards.ASSEMBLY}.dad.{wildcards.DAD_TARGET}.{wildcards.CHROM}",
+        output_dir = lambda wildcards: f"{CUR_PREF}downsampling_tmpdir/{wildcards.SAMPLE}.{wildcards.ASSEMBLY}.{wildcards.KID_TARGET}.{wildcards.MOM_TARGET}.{wildcards.DAD_TARGET}.{wildcards.CHROM}",
+        kid_pref = lambda wildcards: f"{CUR_PREF}downsampling/data/trgt/per-chrom/{wildcards.SAMPLE}.{wildcards.ASSEMBLY}.kid.{wildcards.KID_TARGET}.{wildcards.CHROM}",
+        mom_pref = lambda wildcards: f"{CUR_PREF}downsampling/data/trgt/per-chrom/{wildcards.SAMPLE}.{wildcards.ASSEMBLY}.mom.{wildcards.MOM_TARGET}.{wildcards.CHROM}",
+        dad_pref = lambda wildcards: f"{CUR_PREF}downsampling/data/trgt/per-chrom/{wildcards.SAMPLE}.{wildcards.ASSEMBLY}.dad.{wildcards.DAD_TARGET}.{wildcards.CHROM}",
     script:
         "bash_scripts/run_trgt_denovo.sh"
 
 
 rule combine_trgt_denovo:
     input:
-        fhs = expand("downsampling/csv/denovos/{{SAMPLE}}.{{ASSEMBLY}}.{{KID_TARGET}}.{{MOM_TARGET}}.{{DAD_TARGET}}.{CHROM}.denovo.csv", CHROM=CHROMS)
-    output: fh = "downsampling/csv/combined/{SAMPLE}.{ASSEMBLY}.{KID_TARGET}.{MOM_TARGET}.{DAD_TARGET}.denovo.csv"
+        fhs = expand(CUR_PREF + "downsampling/csv/denovos/{{SAMPLE}}.{{ASSEMBLY}}.{{KID_TARGET}}.{{MOM_TARGET}}.{{DAD_TARGET}}.{CHROM}.denovo.csv", CHROM=CHROMS)
+    output: fh = CUR_PREF + "downsampling/csv/combined/{SAMPLE}.{ASSEMBLY}.{KID_TARGET}.{MOM_TARGET}.{DAD_TARGET}.denovo.csv"
     shell:
         """
         
@@ -416,7 +451,7 @@ rule combine_trgt_denovo:
 rule prefilter_denovos:
     input:
         ped = "tr_validation/data/file_mapping.csv",
-        kid_mutation_df = "downsampling/csv/combined/{SAMPLE}.{ASSEMBLY}.{KID_TARGET}.{MOM_TARGET}.{DAD_TARGET}.denovo.csv",
+        kid_mutation_df = CUR_PREF + "downsampling/csv/combined/{SAMPLE}.{ASSEMBLY}.{KID_TARGET}.{MOM_TARGET}.{DAD_TARGET}.denovo.csv",
         annotations = lambda wildcards: get_annotation_fh(wildcards),
         utils = "scripts/utils.py"
     output: 
@@ -430,10 +465,12 @@ rule prefilter_denovos:
 rule annotate_with_informative_sites:
     input:
         cohort_snp_vcf = "downsampling/data/vcf/trios/merged/{SAMPLE}.{ASSEMBLY}.{KID_TARGET}.{MOM_TARGET}.{DAD_TARGET}.vcf.gz",
+        cohort_snp_vcf_idx = "downsampling/data/vcf/trios/merged/{SAMPLE}.{ASSEMBLY}.{KID_TARGET}.{MOM_TARGET}.{DAD_TARGET}.vcf.gz.tbi",
         kid_phased_snp_vcf = "downsampling/data/vcf/snv/phased/{SAMPLE}.{ASSEMBLY}.kid.{KID_TARGET}.phased.vcf.gz",
         kid_phased_snp_vcf_idx = "downsampling/data/vcf/snv/phased/{SAMPLE}.{ASSEMBLY}.kid.{KID_TARGET}.phased.vcf.gz.tbi",
         kid_mutation_df = "downsampling/csv/prefiltered/{SAMPLE}.{ASSEMBLY}.{KID_TARGET}.{MOM_TARGET}.{DAD_TARGET}.denovo.csv",
         kid_phased_str_vcf = "downsampling/data/trgt/phased/{SAMPLE}.{ASSEMBLY}.kid.{KID_TARGET}.phased.vcf.gz",
+        kid_phased_str_vcf_idx = "downsampling/data/trgt/phased/{SAMPLE}.{ASSEMBLY}.kid.{KID_TARGET}.phased.vcf.gz.tbi",
         py_script = "scripts/annotate_with_informative_sites.py",
     output:
         out = "downsampling/csv/phasing/{SAMPLE}.{ASSEMBLY}.{KID_TARGET}.{MOM_TARGET}.{DAD_TARGET}.annotated.2gen.tsv"
@@ -461,9 +498,13 @@ rule annotate_with_parental_haplotype:
         py_script = "scripts/annotate_with_parental_haplotype.py",
         annotated_dnms = "downsampling/csv/phasing/{SAMPLE}.{ASSEMBLY}.{KID_TARGET}.{MOM_TARGET}.{DAD_TARGET}.annotated.2gen.tsv",
         dad_phased_str_vcf = lambda wildcards: f"downsampling/data/trgt/phased/{wildcards.SAMPLE}.{wildcards.ASSEMBLY}.dad.{wildcards.DAD_TARGET}.phased.vcf.gz",
+        dad_phased_str_vcf_idx = lambda wildcards: f"downsampling/data/trgt/phased/{wildcards.SAMPLE}.{wildcards.ASSEMBLY}.dad.{wildcards.DAD_TARGET}.phased.vcf.gz.tbi",
         dad_phased_snv_vcf = lambda wildcards: f"downsampling/data/vcf/snv/phased/{wildcards.SAMPLE}.{wildcards.ASSEMBLY}.dad.{wildcards.DAD_TARGET}.phased.vcf.gz",
+        dad_phased_snv_vcf_idx = lambda wildcards: f"downsampling/data/vcf/snv/phased/{wildcards.SAMPLE}.{wildcards.ASSEMBLY}.dad.{wildcards.DAD_TARGET}.phased.vcf.gz.tbi",
         mom_phased_str_vcf = lambda wildcards: f"downsampling/data/trgt/phased/{wildcards.SAMPLE}.{wildcards.ASSEMBLY}.mom.{wildcards.MOM_TARGET}.phased.vcf.gz",
+        mom_phased_str_vcf_idx = lambda wildcards: f"downsampling/data/trgt/phased/{wildcards.SAMPLE}.{wildcards.ASSEMBLY}.mom.{wildcards.MOM_TARGET}.phased.vcf.gz.tbi",
         mom_phased_snv_vcf = lambda wildcards: f"downsampling/data/vcf/snv/phased/{wildcards.SAMPLE}.{wildcards.ASSEMBLY}.mom.{wildcards.MOM_TARGET}.phased.vcf.gz",
+        mom_phased_snv_vcf_idx = lambda wildcards: f"downsampling/data/vcf/snv/phased/{wildcards.SAMPLE}.{wildcards.ASSEMBLY}.mom.{wildcards.MOM_TARGET}.phased.vcf.gz.tbi",
     output:
         out = "downsampling/csv/phasing/{SAMPLE}.{ASSEMBLY}.{KID_TARGET}.{MOM_TARGET}.{DAD_TARGET}.haplotyped.2gen.tsv"
     params:
@@ -492,6 +533,53 @@ rule phase:
         python {input.py_script} --annotated_dnms {input.annotated_dnms} \
                                  --out {output}
         """
+
+rule annotate_with_parental_alleles:
+    input:
+        annotated_dnms = "downsampling/csv/phasing/{SAMPLE}.{ASSEMBLY}.{KID_TARGET}.{MOM_TARGET}.{DAD_TARGET}.phased.2gen.tsv",
+        dad_phased_str_vcf = "downsampling/data/trgt/phased/{SAMPLE}.{ASSEMBLY}.dad.{DAD_TARGET}.phased.vcf.gz",
+        mom_phased_str_vcf = "downsampling/data/trgt/phased/{SAMPLE}.{ASSEMBLY}.mom.{MOM_TARGET}.phased.vcf.gz",
+        kid_phased_str_vcf = "downsampling/data/trgt/phased/{SAMPLE}.{ASSEMBLY}.kid.{KID_TARGET}.phased.vcf.gz",
+    output:
+        out = "downsampling/csv/phasing/{SAMPLE}.{ASSEMBLY}.{KID_TARGET}.{MOM_TARGET}.{DAD_TARGET}.allele_sequences.tsv"
+    script:
+        "scripts/annotate_with_parental_allele_sequences.py"
+
+
+rule add_transmission_evidence:
+    input:
+        mutations = "downsampling/csv/prefiltered/{SAMPLE}.{ASSEMBLY}.{KID_TARGET}.{MOM_TARGET}.{DAD_TARGET}.denovo.csv",
+        other_vcfs = get_children_vcfs
+    output: fh = "downsampling/csv/transmission/{SAMPLE}.{ASSEMBLY}.{KID_TARGET}.{MOM_TARGET}.{DAD_TARGET}.tsv"
+    params:
+        generation_to_query = "children"
+    script:
+        "scripts/assess_presence_in_cohort.py"
+
+
+rule add_grandparental_evidence:
+    input:
+        mutations = "downsampling/csv/prefiltered/{SAMPLE}.{ASSEMBLY}.{KID_TARGET}.{MOM_TARGET}.{DAD_TARGET}.denovo.csv",
+        other_vcfs = get_grandparent_vcfs
+    output: fh = "downsampling/csv/grandparents/{SAMPLE}.{ASSEMBLY}.{KID_TARGET}.{MOM_TARGET}.{DAD_TARGET}.tsv"
+    params:
+        generation_to_query = "grandparents"
+    script:
+        "scripts/assess_presence_in_cohort.py"
+
+
+# take all of the de novo mutation metadata and merge into one combined file
+rule merge_all_dnm_files:
+    input:
+        raw_denovos = "downsampling/csv/prefiltered/{SAMPLE}.{ASSEMBLY}.{KID_TARGET}.{MOM_TARGET}.{DAD_TARGET}.denovo.csv",
+        phasing = "downsampling/csv/phasing/{SAMPLE}.{ASSEMBLY}.{KID_TARGET}.{MOM_TARGET}.{DAD_TARGET}.allele_sequences.tsv",
+        # denominator = "downsampling/csv/denominators/{SAMPLE}.{ASSEMBLY}.{KID_TARGET}.{MOM_TARGET}.{DAD_TARGET}.denominator.tsv",
+        transmission = "downsampling/csv/transmission/{SAMPLE}.{ASSEMBLY}.{KID_TARGET}.{MOM_TARGET}.{DAD_TARGET}.tsv",
+        grandparental = "downsampling/csv/grandparents/{SAMPLE}.{ASSEMBLY}.{KID_TARGET}.{MOM_TARGET}.{DAD_TARGET}.tsv"
+    output: out = "downsampling/csv/filtered_and_merged/{SAMPLE}.{ASSEMBLY}.{KID_TARGET}.{MOM_TARGET}.{DAD_TARGET}.tsv"
+    script:
+        "scripts/merge_mutations_with_metadata.py"
+
 # rule prefilter_denovos:
 #     input:
 #         ped = "tr_validation/data/file_mapping.csv",

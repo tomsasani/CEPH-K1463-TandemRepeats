@@ -3,32 +3,66 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from matplotlib.gridspec import GridSpec
+from collections import defaultdict, Counter
+import matplotlib.patches as patches
+
+
+plt.rc("font", size=18, )
+
+plt.rcParams["font.family"] = "sans-serif"
+plt.rcParams["font.sans-serif"] = ["Nimbus Sans"]
 
 TRID = "chr8_2623352_2623487_trsolve"
+
+
 GENOME = "GRCh38"
+
+COHORT = "ceph"
+
+PALETTE = "colorblind"
 
 # store unique characters
 smps = []
 
 hapseq = []
-for record in SeqIO.parse(f"tr_validation/trviz/ceph/{TRID}.{GENOME}_alignment_output.fa", "fasta"):
+for record in SeqIO.parse(f"trviz/ceph/{TRID}.{GENOME}_alignment_output.fa", "fasta"):
     hapseq.append(list(record.seq))
     smps.append(record.id)
 
 hapseq = pd.DataFrame(hapseq)
+print (hapseq)
+# figure out how variable each motif across haplotypes
+motif_variability = defaultdict(list)
+for i, row in hapseq.iterrows():
+    motif_counts = Counter(row.to_list()).most_common()
+    for motif, count in motif_counts:
+        if motif == "-": continue
+        motif_variability[motif].append(count)
+
+
+# remove "static" motifs if desired
+static_motifs = []
+for motif, cts in motif_variability.items():
+    if len(set(cts)) == 1:# hapseq.shape[0]:
+        static_motifs.append(motif)
+
+# hapseq = hapseq.replace(to_replace={m: "-" for m in static_motifs})
 
 orig_cols = hapseq.columns
 
-# get vectorized mapping to integers
+# identify the unique characters in the encoded
+# motif arrays, including "-" gaps
 uniq_chars = np.unique(hapseq.values)
-uniq_vals = np.arange(uniq_chars.shape[0])
+print (uniq_chars)
 
-cmap = sns.color_palette("colorblind", uniq_chars.shape[0] - 1)
+# map characters to colors
+cmap = sns.color_palette(PALETTE, uniq_chars.shape[0] - 1)
+cdict = dict(zip(uniq_chars[1:], cmap))
 
-mapping_dict = dict(zip(uniq_chars, uniq_vals))
-vectorized_map = np.vectorize(lambda x: mapping_dict[x]) 
 
 hapseq["sample"] = smps
+
 hapseq["sample_id"] = hapseq["sample"].apply(lambda s: s.split("_")[0])
 
 hapseq["generation"] = hapseq["sample_id"].apply(
@@ -67,90 +101,143 @@ hapseq["has_denovo"] = hapseq["sample"].apply(lambda s: s.split("_")[-1])
 # don't plot G1 as a separate generation
 gen_to_plot = [g for g in hapseq["generation"].unique() if g != "G1"]
 
-height_ratios = [1]
 n_per_gen = hapseq.groupby("generation").size().to_dict()
 
-min_per_gen = min([v for k,v in n_per_gen.items()])
 
-height_ratios = [v for k,v in n_per_gen.items()]
-height_ratios = [1, 0.75, 0.75, 3, 2.5, 2.5]
-
-f, axarr = plt.subplots(
-    hapseq["generation"].nunique(),
-    sharex=False,
-    figsize=(8, 18),
-    height_ratios=height_ratios,
+gs_kw = dict(width_ratios=[1., 1], height_ratios=[1, 1., 3])
+f, axarr = plt.subplot_mosaic(
+    [
+        ["G2A", "G4A"],
+        ["G2B", "G4A"],
+        ["G3", "G4B"],
+    ],
+    gridspec_kw=gs_kw,
+    figsize=(18, 12),
+    layout="constrained",
+    sharex=True,
 )
 
+# f, axarr = plt.subplots(
+#     hapseq["generation"].nunique() - 1,
+#     sharex=True,
+#     sharey=False,
+#     figsize=(8, 18),
+#     height_ratios=height_ratios,
+# )
+
 # loop over the generations
-for gen_i, (gen, _) in enumerate(n_per_gen.items()):
+for gen_i, gen in enumerate(["G2A", "G2B", "G3", "G4A", "G4B"]):
 
     # collect the kids in this generation
     kid_df = hapseq[hapseq["generation"] == gen]
+
+
+    # ignore spouses outside the family
+    kid_df = kid_df[~kid_df["sample_id"].isin(["200080", "200100"])]
+    
     # plot the kids second
-    kid_df["order"] = 1
+    kid_df["order"] = 0
     # collect the parents in this generation
     par_df = hapseq[hapseq["parent_status"] == gen]
     # plot the parents first
-    par_df["order"] = 0
+    par_df["order"] = 1
 
     gen_df = pd.concat([par_df, kid_df]).sort_values("order")
+
+    order_vals = gen_df["order"].values
 
     # get a list of haplotypes with DNMs
     has_denovo = gen_df["has_denovo"].values == "denovo"
 
+    # convert characters to integers, including "-",
+    # which will be converted to 0s
     gen_hapseq = gen_df[orig_cols].values
-    gen_hapseq = vectorized_map(gen_hapseq)
 
-    gen_hapseq = np.where(gen_hapseq == 0, np.nan, gen_hapseq)
+    # NOTE: specific for this TRID to ignore static motifs
+    # gen_hapseq = gen_hapseq[:, :-6]
 
-    sns.heatmap(gen_hapseq, ax=axarr[gen_i], lw=0.5, ec="w", cbar=False, cmap=cmap)
-    axarr[gen_i].set_yticks(np.arange(gen_df.shape[0]) + 0.5)
-    axarr[gen_i].set_yticklabels(gen_df["sample_id"].values, rotation=0)
-    axarr[gen_i].set_title(gen)
+    n_haps, n_motifs = gen_hapseq.shape
 
-    for i, t in enumerate(axarr[gen_i].yaxis.get_ticklabels()):
+    # get colors for the specific range of values seen in the hapseq array
+    # ax = axarr[gen_i]
+    ax = axarr[gen]
+
+    ytick_vals = []
+
+    cur_y = 0
+    parent_spaced = False
+    for hap_i, hap_seq in enumerate(gen_hapseq):
+        # manual hacking to separate parents and individual samples
+        # while keeping samples' haplotypes plotted together
+        if order_vals[hap_i] == 1 and not parent_spaced:
+            cur_y += 1.5
+            parent_spaced = True
+        if hap_i % 2 == 1:
+            cur_y += 0.25
+        if hap_i % 2 == 0:
+            cur_y += 1
+        
+        ytick_vals.append(cur_y)
+
+        for motif_i, motif in enumerate(hap_seq):
+            if motif == "-": continue
+            rect = patches.FancyBboxPatch(
+                (n_motifs - motif_i, cur_y),
+                0.33,
+                0.33,
+                linewidth=1,
+                edgecolor="black",
+                facecolor=cdict[motif],
+                clip_on=False,
+                boxstyle="round"
+            )
+            ax.add_patch(rect)
+        cur_y += 1
+    ax.set_xlim(0, n_motifs + 1.5)
+    ax.set_ylim(0, max(ytick_vals) + 1.5)
+
+    
+    ax.set_yticks(ytick_vals)
+    ax.set_yticklabels(gen_df["sample_id"].values, rotation=0)
+    ax.set_title(gen)
+
+    sns.despine(ax=ax)
+
+    for i, t in enumerate(ax.yaxis.get_ticklabels()):
         if has_denovo[i] and t.get_text() not in par_df["sample_id"].to_list():
             t.set_color("red")
-            t.set_fontstyle("italic")
+            t.set_fontstyle("oblique")
         if t.get_text() in par_df["sample_id"].to_list():
             t.set_fontweight("bold")
-
-
-    # add dividing lines between samples and haplotypes
-    for i in np.arange(1, gen_df.shape[0], 2):
-        axarr[gen_i].axhline(i, lw=1, c="gainsboro", ls=":")
-    for i in np.arange(0, gen_df.shape[0], 2):
-        axarr[gen_i].axhline(i, lw=2, c="w")
-    axarr[gen_i].axhline(4, lw=6, c="w")
-    if gen_i != len(height_ratios) - 1:
-        axarr[gen_i].set_xticks([])
 
 
 # make custom legend
 from matplotlib.lines import Line2D
 import matplotlib.patches as mpatches
 
+print (uniq_chars)
 # get colors used in palette
 custom_legend = []
-for char, color in zip(uniq_chars[1:], cmap):
+for char, color in zip(uniq_chars[1:], cmap[:-1]):
     custom_legend.append(mpatches.Patch(color=color))
 
-key = pd.read_csv(f"tr_validation/trviz/ceph/{TRID}.{GENOME}.key.tsv", sep="\t", names=["motif", "encoded_motif", "count"])
+key = pd.read_csv(f"trviz/ceph/{TRID}.{GENOME}.key.tsv", sep="\t", names=["motif", "encoded_motif", "count"])
 
 encoded2motif = dict(zip(key["encoded_motif"], key["motif"]))
 
-print (key)
+print (encoded2motif)
 
-axarr[-1].legend(
+axarr["G4B"].legend(
     custom_legend,
     key["motif"].to_list(),
-    prop={"family": "monospace", "size": 10},
+    prop={"family": "monospace", "size": 12},
     frameon=True,
     shadow=True,
+    # loc="lower left",
+    # bbox_to_anchor=(0.5, 1.05)
 )
 
-axarr[-1].set_xlabel("Motif number")
+axarr["G4B"].set_xlabel("Motif number")
 # f.suptitle(f"{TRID} ({GENOME})")
 f.tight_layout()
 f.savefig("trviz_haplotypes.png", dpi=200)

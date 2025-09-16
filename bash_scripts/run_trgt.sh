@@ -7,4 +7,5 @@ ${snakemake_input[trgt_binary]} genotype \
     --repeats ${snakemake_input[repeats]} \
     --reads ${snakemake_input[bam]} \
     ${snakemake_params[karyotype_cmd]} \
-    --output-prefix ${snakemake_params[output_prefix]}
+    --output-prefix ${snakemake_params[output_prefix]} \
+    -v
